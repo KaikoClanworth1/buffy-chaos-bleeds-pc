@@ -75,15 +75,16 @@ It also adds:
   <img src="docs/images/install-flow.svg" alt="Disc image, then Launcher Install, then Settings and Mods, then Play" width="100%">
 </p>
 
-1. **Make a disc image** of your Xbox game disc, as an `.iso` or `.xiso`.
-2. **Open `Buffy Launcher.exe`** and go to the **Install** tab:
+1. **Download** the latest zip from [**Releases**](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/releases/latest) and unzip it anywhere. It holds the launcher and the game program, with no game data.
+2. **Make a disc image** of your Xbox game disc, as an `.iso` or `.xiso`.
+3. **Open `Buffy Launcher.exe`** and go to the **Install** tab:
    1. Under **Disc image**, choose your `.iso` or `.xiso`.
    2. Under **Install to**, choose an empty folder.
    3. Leave **Convert the game's movies** ticked to keep the cutscene movies. If FFmpeg isn't found, click **Download FFmpeg**.
    4. Click **Install**. The launcher only reads the image and never changes it. It copies the game out (about 4 minutes) and sets up the PC version beside it.
-3. **Settings tab**: pick windowed or fullscreen, the resolution, VSync and so on.
-4. **Mods tab**: tick any mods you want. See the [mods table](#mods-what-each-one-does).
-5. **Play tab**: press **Play**.
+4. **Settings tab**: pick windowed or fullscreen, the resolution, VSync and so on.
+5. **Mods tab**: tick any mods you want. See the [mods table](#mods-what-each-one-does).
+6. **Play tab**: press **Play**.
 
 Your saves go to `SaveData\` inside the game folder.
 
