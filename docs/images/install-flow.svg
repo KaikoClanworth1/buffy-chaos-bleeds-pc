@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 250" width="960" height="250" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8f7fa0"/>
+    </marker>
+  </defs>
+  <rect width="960" height="250" rx="14" fill="#f7f4fa"/>
+  <!-- 1 -->
+  <g transform="translate(30 45)">
+    <rect width="200" height="150" rx="12" fill="#ffffff" stroke="#c9bdd6" stroke-width="2"/>
+    <circle cx="100" cy="58" r="34" fill="#e7e1ee" stroke="#9c8bb0" stroke-width="2"/>
+    <circle cx="100" cy="58" r="8" fill="#ffffff" stroke="#9c8bb0" stroke-width="2"/>
+    <text x="100" y="116" text-anchor="middle" font-size="16" font-weight="600" fill="#3a2c48">1. Your disc image</text>
+    <text x="100" y="136" text-anchor="middle" font-size="13" fill="#6b5b7b">.iso or .xiso you made</text>
+  </g>
+  <line x1="238" y1="120" x2="268" y2="120" stroke="#8f7fa0" stroke-width="3" marker-end="url(#arr)"/>
+  <!-- 2 -->
+  <g transform="translate(276 45)">
+    <rect width="200" height="150" rx="12" fill="#ffffff" stroke="#c9bdd6" stroke-width="2"/>
+    <rect x="45" y="24" width="110" height="70" rx="6" fill="#2b1b33"/>
+    <rect x="45" y="24" width="110" height="16" rx="6" fill="#4a2e57"/>
+    <rect x="58" y="50" width="40" height="8" rx="2" fill="#c79a4a"/>
+    <rect x="58" y="64" width="84" height="6" rx="2" fill="#6d5a7a"/>
+    <rect x="58" y="76" width="64" height="6" rx="2" fill="#6d5a7a"/>
+    <text x="100" y="116" text-anchor="middle" font-size="16" font-weight="600" fill="#3a2c48">2. Launcher → Install</text>
+    <text x="100" y="136" text-anchor="middle" font-size="13" fill="#6b5b7b">copies the game from it</text>
+  </g>
+  <line x1="484" y1="120" x2="514" y2="120" stroke="#8f7fa0" stroke-width="3" marker-end="url(#arr)"/>
+  <!-- 3 -->
+  <g transform="translate(522 45)">
+    <rect width="200" height="150" rx="12" fill="#ffffff" stroke="#c9bdd6" stroke-width="2"/>
+    <path d="M52 34 h36 l10 10 h50 v52 h-96 z" fill="#f0c96b" stroke="#c79a4a" stroke-width="2"/>
+    <text x="100" y="116" text-anchor="middle" font-size="16" font-weight="600" fill="#3a2c48">3. Settings &amp; Mods</text>
+    <text x="100" y="136" text-anchor="middle" font-size="13" fill="#6b5b7b">resolution, VSync, mods…</text>
+  </g>
+  <line x1="730" y1="120" x2="760" y2="120" stroke="#8f7fa0" stroke-width="3" marker-end="url(#arr)"/>
+  <!-- 4 -->
+  <g transform="translate(768 45)">
+    <rect width="162" height="150" rx="12" fill="#3a1030" stroke="#6b2a58" stroke-width="2"/>
+    <polygon points="62,34 62,90 110,62" fill="#f3e2b0"/>
+    <text x="81" y="116" text-anchor="middle" font-size="16" font-weight="600" fill="#f3e2b0">4. Play</text>
+    <text x="81" y="136" text-anchor="middle" font-size="13" fill="#d9c3d5">controller or keyboard</text>
+  </g>
+</svg>

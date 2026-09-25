@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="960" height="300" rx="14" fill="#f7f4fa"/>
+  <!-- Two windows -->
+  <text x="160" y="36" text-anchor="middle" font-size="18" font-weight="600" fill="#3a2c48">Two Windows</text>
+  <g transform="translate(20 52)">
+    <rect width="132" height="92" rx="8" fill="#2b1b33"/>
+    <rect x="6" y="6" width="120" height="74" rx="4" fill="#5a3a6a"/>
+    <text x="66" y="50" text-anchor="middle" font-size="16" font-weight="700" fill="#f3e2b0">P1</text>
+    <rect x="52" y="92" width="28" height="12" fill="#2b1b33"/>
+    <rect x="36" y="104" width="60" height="6" rx="3" fill="#2b1b33"/>
+    <rect x="148" width="132" height="92" rx="8" fill="#2b1b33"/>
+    <rect x="154" y="6" width="120" height="74" rx="4" fill="#355a6a"/>
+    <text x="214" y="50" text-anchor="middle" font-size="16" font-weight="700" fill="#cfe9f3">P2</text>
+    <rect x="200" y="92" width="28" height="12" fill="#2b1b33"/>
+    <rect x="184" y="104" width="60" height="6" rx="3" fill="#2b1b33"/>
+  </g>
+  <text x="160" y="196" text-anchor="middle" font-size="13" fill="#6b5b7b">each player gets their own window —</text>
+  <text x="160" y="214" text-anchor="middle" font-size="13" fill="#6b5b7b">drag it to a second monitor or TV</text>
+
+  <!-- Split screen -->
+  <text x="480" y="36" text-anchor="middle" font-size="18" font-weight="600" fill="#3a2c48">Split Screen</text>
+  <g transform="translate(378 52)">
+    <rect width="204" height="120" rx="8" fill="#2b1b33"/>
+    <rect x="6" y="6" width="95" height="100" rx="4" fill="#5a3a6a"/>
+    <rect x="103" y="6" width="95" height="100" rx="4" fill="#355a6a"/>
+    <text x="53" y="62" text-anchor="middle" font-size="16" font-weight="700" fill="#f3e2b0">P1</text>
+    <text x="150" y="62" text-anchor="middle" font-size="16" font-weight="700" fill="#cfe9f3">P2</text>
+  </g>
+  <text x="480" y="196" text-anchor="middle" font-size="13" fill="#6b5b7b">one window, side by side,</text>
+  <text x="480" y="214" text-anchor="middle" font-size="13" fill="#6b5b7b">each half its own camera</text>
+
+  <!-- One screen -->
+  <text x="800" y="36" text-anchor="middle" font-size="18" font-weight="600" fill="#3a2c48">One Screen</text>
+  <g transform="translate(698 52)">
+    <rect width="204" height="120" rx="8" fill="#2b1b33"/>
+    <rect x="6" y="6" width="192" height="100" rx="4" fill="#4a3a5a"/>
+    <text x="102" y="62" text-anchor="middle" font-size="16" font-weight="700" fill="#e8d9e6">P1 + P2</text>
+  </g>
+  <text x="800" y="196" text-anchor="middle" font-size="13" fill="#6b5b7b">the camera follows player 1</text>
+
+  <text x="480" y="262" text-anchor="middle" font-size="14" fill="#3a2c48">Cutscenes, movies and menus always show on both screens.  Switch any time: Pause → Co-op → Screens.</text>
+</svg>

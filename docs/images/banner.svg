@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 220" width="960" height="220">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b1022"/>
+      <stop offset="1" stop-color="#3a1030"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f3e2b0"/>
+      <stop offset="1" stop-color="#c79a4a"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="220" rx="18" fill="url(#bg)"/>
+  <!-- a stake -->
+  <g transform="translate(92 110) rotate(-35)">
+    <rect x="-9" y="-70" width="18" height="110" rx="4" fill="#8a5a2b"/>
+    <rect x="-9" y="-70" width="6" height="110" rx="3" fill="#a8743d"/>
+    <polygon points="-9,40 9,40 0,78" fill="#6e4520"/>
+    <rect x="-13" y="-58" width="26" height="8" rx="2" fill="#5a381a"/>
+  </g>
+  <text x="170" y="96" font-family="Georgia, 'Times New Roman', serif" font-size="46" fill="url(#gold)">Chaos Bleeds</text>
+  <text x="172" y="136" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="22" fill="#e8d9e6">A native PC port of the 2003 Xbox game</text>
+  <text x="172" y="170" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="16" fill="#b9a3b6">Bring your own disc  ·  1080p / 4K  ·  Launcher  ·  Mods  ·  Two-screen story co-op</text>
+</svg>

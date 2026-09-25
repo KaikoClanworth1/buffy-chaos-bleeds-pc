@@ -1,0 +1,50 @@
+# ── Game data: never in this repository. Players supply their own disc. ──
+GAME/
+game_files/
+Xbox Iso/
+*.iso
+*.xiso
+*.xbe
+*.map
+*.xmv
+*.xbx
+!xboxrecomp/tools/conformance/test.xbe
+SaveData/
+UDATA/
+TDATA/
+
+# Recompiled game code (generated from your own XBE by port/tools/regen.sh)
+port/src/recomp/gen/
+xboxrecomp/game_files/
+xboxrecomp/tools/disasm/output/
+xboxrecomp/tools/func_id/output/
+xboxrecomp/tools/recomp/output/
+xboxrecomp/tools/abi_analysis/output/
+xboxrecomp/tools/split/output/
+
+# Builds, packages, test runs, logs
+build/
+dist/
+port/runs/
+*.log
+build_log.txt
+*.exe
+*.dll
+*.pdb
+*.obj
+*.lib
+*.ilk
+*.exp
+ShaderCache/
+buffy_settings.ini
+launcher.ini
+
+# Local only
+_local/
+__pycache__/
+*.pyc
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 260" width="960" height="260" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8f7fa0"/>
+    </marker>
+  </defs>
+  <rect width="960" height="260" rx="14" fill="#f7f4fa"/>
+  <g transform="translate(40 40)">
+    <rect width="250" height="180" rx="12" fill="#ffffff" stroke="#c9bdd6" stroke-width="2"/>
+    <text x="20" y="34" font-size="16" font-weight="600" fill="#3a2c48">mods\my-mod\</text>
+    <text x="36" y="66" font-size="14" fill="#5b4b6b">mod.ini</text>
+    <text x="52" y="88" font-size="12" fill="#8a7a9a">name, description,</text>
+    <text x="52" y="104" font-size="12" fill="#8a7a9a">[Patches] switches</text>
+    <text x="36" y="134" font-size="14" fill="#5b4b6b">files\</text>
+    <text x="52" y="156" font-size="12" fill="#8a7a9a">replacement game files,</text>
+    <text x="52" y="172" font-size="12" fill="#8a7a9a">laid out like the game folder</text>
+  </g>
+  <line x1="298" y1="130" x2="358" y2="130" stroke="#8f7fa0" stroke-width="3" marker-end="url(#a)"/>
+  <g transform="translate(366 40)">
+    <rect width="228" height="180" rx="12" fill="#3a1030" stroke="#6b2a58" stroke-width="2"/>
+    <text x="114" y="40" text-anchor="middle" font-size="16" font-weight="600" fill="#f3e2b0">Launcher → Mods</text>
+    <rect x="30" y="62" width="18" height="18" rx="3" fill="#f3e2b0"/>
+    <path d="M34 71 l4 4 l7 -9" stroke="#3a1030" stroke-width="3" fill="none"/>
+    <text x="58" y="76" font-size="13" fill="#e8d9e6">Story co-op</text>
+    <rect x="30" y="92" width="18" height="18" rx="3" fill="#f3e2b0"/>
+    <path d="M34 101 l4 4 l7 -9" stroke="#3a1030" stroke-width="3" fill="none"/>
+    <text x="58" y="106" font-size="13" fill="#e8d9e6">Unlock all characters</text>
+    <rect x="30" y="122" width="18" height="18" rx="3" fill="none" stroke="#f3e2b0" stroke-width="2"/>
+    <text x="58" y="136" font-size="13" fill="#e8d9e6">Always play as Willow</text>
+    <text x="114" y="166" text-anchor="middle" font-size="12" fill="#b9a3b6">tick, untick, order</text>
+  </g>
+  <line x1="602" y1="130" x2="662" y2="130" stroke="#8f7fa0" stroke-width="3" marker-end="url(#a)"/>
+  <g transform="translate(670 40)">
+    <rect width="250" height="180" rx="12" fill="#ffffff" stroke="#c9bdd6" stroke-width="2"/>
+    <text x="125" y="36" text-anchor="middle" font-size="16" font-weight="600" fill="#3a2c48">The game sees</text>
+    <rect x="30" y="56" width="190" height="40" rx="6" fill="#e7e1ee"/>
+    <text x="125" y="81" text-anchor="middle" font-size="13" fill="#3a2c48">your game files</text>
+    <rect x="30" y="102" width="190" height="40" rx="6" fill="#f0c96b"/>
+    <text x="125" y="127" text-anchor="middle" font-size="13" fill="#3a2c48">+ mod files on top</text>
+    <text x="125" y="164" text-anchor="middle" font-size="12" fill="#8a7a9a">nothing on disk is changed</text>
+  </g>
+</svg>
