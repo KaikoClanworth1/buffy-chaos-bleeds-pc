@@ -627,14 +627,17 @@ static int copy_out(Disc *d, DiscFile *df, const WCHAR *target, uint8_t *buf, ui
 /* The port's own files, from the launcher's folder to the install. */
 static int copy_program(const WCHAR *target)
 {
-    static const WCHAR *files[] = { GAME_EXE, L"buffy_chaos_bleeds.pdb", L"Read Me.txt" };
+    /* The Visual C++ runtime ships beside the exe (app-local), for PCs
+     * without the redistributable installed. */
+    static const WCHAR *files[] = { GAME_EXE, L"buffy_chaos_bleeds.pdb", L"Read Me.txt",
+                                    L"vcruntime140.dll", L"vcruntime140_1.dll" };
     WCHAR src[MAX_PATH], dst[MAX_PATH], pat[MAX_PATH];
     WIN32_FIND_DATAW fd;
     HANDLE h;
     int i;
     if (!_wcsicmp(target, s_launcher_dir))
         return 1;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < (int)_countof(files); i++) {
         join(src, s_launcher_dir, files[i]);
         join(dst, target, files[i]);
         if (file_exists(src) && !CopyFileW(src, dst, FALSE) && i == 0) {

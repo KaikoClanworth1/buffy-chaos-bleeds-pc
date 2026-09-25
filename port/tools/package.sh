@@ -11,6 +11,9 @@ mkdir -p "$OUT/ShaderCache"
 cp -f "$BIN/Buffy Launcher.exe" "$BIN/buffy_chaos_bleeds.exe" "$OUT/"
 cp -f "$BIN/buffy_chaos_bleeds.pdb" "$OUT/" 2>/dev/null || true
 cp -f "$ROOT/port/tools/ReadMe.txt" "$OUT/Read Me.txt"
+# Visual C++ runtime, app-local, for PCs without the redistributable.
+CRT="$(ls -d "/c/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Redist/MSVC/"*/x64/Microsoft.VC142.CRT 2>/dev/null | tail -1)"
+[ -n "$CRT" ] && cp -f "$CRT/vcruntime140.dll" "$CRT/vcruntime140_1.dll" "$OUT/" || echo "warning: VC++ runtime DLLs not found"
 cp -f "$BIN/ShaderCache/"*.cso "$OUT/ShaderCache/" 2>/dev/null || true
 cp -f "$ROOT/GAME/ShaderCache/"*.cso "$OUT/ShaderCache/" 2>/dev/null || true
 mkdir -p "$OUT/mods" && cp -r "$ROOT/port/mods/"* "$OUT/mods/"
