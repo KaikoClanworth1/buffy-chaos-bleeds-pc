@@ -15,7 +15,7 @@
  *             port's program files copied beside them, and the movies
  *             converted for PC playback when FFmpeg is available.
  *
- * Command line (tests):  --capture <play|settings|mods|install> <file.bmp>
+ * Command line (tests):  --capture <play|settings|mods|textures|install> <file.bmp>
  *                        --install <image> <folder>   (no window; exit code)
  */
 #ifndef WIN32_LEAN_AND_MEAN
@@ -47,7 +47,7 @@
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' " \
                         "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-#define LAUNCHER_VERSION  L"1.0"
+#define LAUNCHER_VERSION  L"1.1"
 #define GAME_TITLE        L"Buffy the Vampire Slayer: Chaos Bleeds"
 #define GAME_EXE          L"buffy_chaos_bleeds.exe"
 #define TITLE_ID          0x56550005u   /* from the disc's default.xbe certificate */
@@ -55,7 +55,7 @@
 
 /* ── state ─────────────────────────────────────────────────────────────── */
 
-enum { TAB_PLAY, TAB_SETTINGS, TAB_MODS, TAB_INSTALL, TAB_COUNT };
+enum { TAB_PLAY, TAB_SETTINGS, TAB_MODS, TAB_TEXTURES, TAB_INSTALL, TAB_COUNT };
 
 enum {
     ID_TAB = 100,
@@ -67,6 +67,8 @@ enum {
     /* mods */
     ID_MODLIST, ID_MOD_DESC, ID_MOD_UP, ID_MOD_DOWN, ID_MOD_OPEN, ID_MOD_REFRESH, ID_MOD_APPLY,
     ID_MOD_STATUS,
+    /* textures */
+    ID_TEX_LOAD, ID_TEX_PREFETCH, ID_TEX_DUMP, ID_TEX_OPEN_LOAD, ID_TEX_OPEN_DUMP, ID_TEX_REFRESH, ID_TEX_STATUS,
     /* install */
     ID_IMAGE, ID_IMAGE_BROWSE, ID_TARGET, ID_TARGET_BROWSE, ID_MOVIES, ID_FFMPEG_STATUS,
     ID_FFMPEG_GET, ID_INSTALL, ID_PROGRESS, ID_INSTALL_STATUS,
@@ -1257,6 +1259,137 @@ static int pick_image(WCHAR *out)
     return 1;
 }
 
+/* ── textures ──────────────────────────────────────────────────────────── */
+
+/* Texture packs, as in Dolphin and PCSX2: the game dumps its textures to
+ * textures_replacement\dump and replaces them with the images in
+ * textures_replacement\load ([Textures] in buffy_settings.ini). */
+
+static void tex_dir(WCHAR *out, const WCHAR *sub)
+{
+    WCHAR root[MAX_PATH];
+    join(root, s_game_dir, L"textures_replacement");
+    if (sub)
+        join(out, root, sub);
+    else
+        wcscpy_s(out, MAX_PATH, root);
+}
+
+static void write_tex_readme(void)
+{
+    static const char readme[] =
+        "Buffy the Vampire Slayer: Chaos Bleeds texture packs\r\n"
+        "====================================================\r\n\r\n"
+        "Switch these on in the launcher's Textures tab.\r\n\r\n"
+        "dump\\  With \"Dump textures\" on, every texture the game shows is saved here\r\n"
+        "       once, as a PNG named  buffy_<width>x<height>_<code>_<format>.png\r\n\r\n"
+        "load\\  With \"Load custom textures\" on, an image here replaces the game's\r\n"
+        "       texture that has the same 16-character code in its name.\r\n"
+        "       - PNG (or DDS), any size: 2x or 4x the original looks sharper.\r\n"
+        "       - Keep the code in the name; anything else may change\r\n"
+        "         (buffy_256x256_049c2d6e895bf871_06_HD.png is fine).\r\n"
+        "       - Subfolders are fine, so a pack can be one folder.\r\n"
+        "       - Keep the transparent parts transparent.\r\n\r\n"
+        "Making a pack: tick Dump, play the parts you want to change, copy the\r\n"
+        "PNGs you want from dump\\ into load\\, edit them, then untick Dump and\r\n"
+        "tick Load. Sharing a pack: zip your folder from load\\; others unzip it\r\n"
+        "into their load\\ folder.\r\n";
+    WCHAR p[MAX_PATH];
+    HANDLE h;
+    DWORD n;
+    tex_dir(p, L"README.txt");
+    h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        WriteFile(h, readme, (DWORD)(sizeof readme - 1), &n, NULL);
+        CloseHandle(h);
+    }
+}
+
+static void tex_make_dirs(void)
+{
+    WCHAR d[MAX_PATH];
+    tex_dir(d, L"load");
+    mkdirs(d);
+    tex_dir(d, L"dump");
+    mkdirs(d);
+    write_tex_readme();
+}
+
+/* Images in a folder and its subfolders. */
+static int tex_count(const WCHAR *dir, int depth)
+{
+    WCHAR pat[MAX_PATH], p[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int n = 0;
+    join(pat, dir, L"*");
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    do {
+        const WCHAR *ext = wcsrchr(fd.cFileName, L'.');
+        if (fd.cFileName[0] == L'.')
+            continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (depth < 8) {
+                join(p, dir, fd.cFileName);
+                n += tex_count(p, depth + 1);
+            }
+        } else if (ext && (!_wcsicmp(ext, L".png") || !_wcsicmp(ext, L".dds"))) {
+            n++;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+static void tex_refresh(void)
+{
+    WCHAR p[MAX_PATH], d[MAX_PATH], t[256];
+    int ok = is_game_folder(s_game_dir), i;
+    int ids[] = { ID_TEX_LOAD, ID_TEX_PREFETCH, ID_TEX_DUMP, ID_TEX_OPEN_LOAD, ID_TEX_OPEN_DUMP, ID_TEX_REFRESH };
+    for (i = 0; i < (int)(sizeof ids / sizeof ids[0]); i++)
+        EnableWindow(ctl(ids[i]), ok);
+    if (!ok) {
+        set_text(ID_TEX_STATUS, L"Install the game first (Install tab).");
+        return;
+    }
+    settings_path(p);
+    CheckDlgButton(s_wnd, ID_TEX_LOAD, GetPrivateProfileIntW(L"Textures", L"Load", 0, p) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_TEX_PREFETCH,
+                   GetPrivateProfileIntW(L"Textures", L"Prefetch", 0, p) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_TEX_DUMP, GetPrivateProfileIntW(L"Textures", L"Dump", 0, p) ? BST_CHECKED : BST_UNCHECKED);
+    EnableWindow(ctl(ID_TEX_PREFETCH), IsDlgButtonChecked(s_wnd, ID_TEX_LOAD) == BST_CHECKED);
+    tex_make_dirs();
+    tex_dir(d, L"load");
+    i = tex_count(d, 0);
+    tex_dir(d, L"dump");
+    swprintf_s(t, 256, L"Custom textures in load: %d.   Dumped textures in dump: %d.", i, tex_count(d, 0));
+    set_text(ID_TEX_STATUS, t);
+}
+
+static void tex_save(void)
+{
+    WCHAR p[MAX_PATH];
+    if (!is_game_folder(s_game_dir))
+        return;
+    settings_path(p);
+    WritePrivateProfileStringW(L"Textures", L"Load", IsDlgButtonChecked(s_wnd, ID_TEX_LOAD) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Textures", L"Prefetch", IsDlgButtonChecked(s_wnd, ID_TEX_PREFETCH) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Textures", L"Dump", IsDlgButtonChecked(s_wnd, ID_TEX_DUMP) ? L"1" : L"0", p);
+    EnableWindow(ctl(ID_TEX_PREFETCH), IsDlgButtonChecked(s_wnd, ID_TEX_LOAD) == BST_CHECKED);
+}
+
+static void tex_open(const WCHAR *sub)
+{
+    WCHAR d[MAX_PATH];
+    if (!is_game_folder(s_game_dir))
+        return;
+    tex_make_dirs();
+    tex_dir(d, sub);
+    ShellExecuteW(s_wnd, L"open", d, NULL, NULL, SW_SHOWNORMAL);
+}
+
 /* ── window ────────────────────────────────────────────────────────────── */
 
 #define HEADER_H 64      /* dark title band */
@@ -1285,6 +1418,8 @@ static void show_tab(int t)
         refresh_play();
     if (t == TAB_MODS)
         mods_scan();
+    if (t == TAB_TEXTURES)
+        tex_refresh();
     TabCtrl_SetCurSel(s_tab, t);
 }
 
@@ -1296,7 +1431,7 @@ static void build_ui(void)
     LVCOLUMNW col;
     WCHAR v[64];
     int i;
-    static const WCHAR *names[TAB_COUNT] = { L"Play", L"Settings", L"Mods", L"Install" };
+    static const WCHAR *names[TAB_COUNT] = { L"Play", L"Settings", L"Mods", L"Textures", L"Install" };
 
     /* Just the strip of tabs; the pages below are plain window. */
     s_tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER,
@@ -1368,6 +1503,30 @@ static void build_ui(void)
     add(TAB_MODS, L"Button", L"Open mods folder", BS_PUSHBUTTON | WS_TABSTOP, X0, 420, 140, 30, ID_MOD_OPEN);
     add(TAB_MODS, L"Button", L"Refresh", BS_PUSHBUTTON | WS_TABSTOP, X0 + 150, 420, 100, 30, ID_MOD_REFRESH);
     add(TAB_MODS, L"Button", L"Apply mods", BS_PUSHBUTTON | WS_TABSTOP, X0 + 452, 420, 108, 30, ID_MOD_APPLY);
+
+    /* Textures */
+    add(TAB_TEXTURES, L"Static", L"Swap the game's textures for your own, like Dolphin and PCSX2 texture packs. "
+                                 L"They live in the game folder's textures_replacement folder.",
+        SS_LEFT, X0, 50, 560, 36, 0);
+    add(TAB_TEXTURES, L"Button", L"Custom textures", BS_GROUPBOX, X0, 92, 560, 96, 0);
+    add(TAB_TEXTURES, L"Button", L"Load custom textures from textures_replacement\\load", BS_AUTOCHECKBOX | WS_TABSTOP,
+        X0 + 16, 116, 520, 24, ID_TEX_LOAD);
+    add(TAB_TEXTURES, L"Button", L"Load them all when the game starts (no stutter the first time each one is "
+                                 L"seen; uses more memory)", BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP,
+        X0 + 36, 144, 500, 36, ID_TEX_PREFETCH);
+    add(TAB_TEXTURES, L"Button", L"Dumping", BS_GROUPBOX, X0, 196, 560, 76, 0);
+    add(TAB_TEXTURES, L"Button", L"Dump textures while playing to textures_replacement\\dump",
+        BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 16, 220, 520, 24, ID_TEX_DUMP);
+    add(TAB_TEXTURES, L"Static", L"Each texture is saved once, as a PNG. Leave it off when not making a pack.",
+        SS_LEFT, X0 + 36, 246, 500, 20, 0);
+    add(TAB_TEXTURES, L"Static", L"Making a pack:  1. Tick Dump and play the parts you want to change.  "
+                                 L"2. Copy those PNGs from dump into load and edit them - any size, but keep the "
+                                 L"16-character code in the name.  3. Untick Dump, tick Load, and play.",
+        SS_LEFT, X0, 282, 560, 54, 0);
+    add(TAB_TEXTURES, L"Static", L"", SS_LEFT, X0, 346, 560, 40, ID_TEX_STATUS);
+    add(TAB_TEXTURES, L"Button", L"Open load folder", BS_PUSHBUTTON | WS_TABSTOP, X0, 420, 140, 30, ID_TEX_OPEN_LOAD);
+    add(TAB_TEXTURES, L"Button", L"Open dump folder", BS_PUSHBUTTON | WS_TABSTOP, X0 + 150, 420, 140, 30, ID_TEX_OPEN_DUMP);
+    add(TAB_TEXTURES, L"Button", L"Refresh", BS_PUSHBUTTON | WS_TABSTOP, X0 + 460, 420, 100, 30, ID_TEX_REFRESH);
 
     /* Install */
     add(TAB_INSTALL, L"Static", L"1.  Your Buffy the Vampire Slayer: Chaos Bleeds disc image (Xbox ISO or XISO)",
@@ -1508,6 +1667,12 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
         case ID_SAVE:
             settings_save();
             break;
+        case ID_TEX_LOAD: case ID_TEX_PREFETCH: case ID_TEX_DUMP:
+            tex_save();
+            break;
+        case ID_TEX_OPEN_LOAD: tex_open(L"load"); break;
+        case ID_TEX_OPEN_DUMP: tex_open(L"dump"); break;
+        case ID_TEX_REFRESH: tex_refresh(); break;
         case ID_MOD_UP: mods_move(-1); break;
         case ID_MOD_DOWN: mods_move(1); break;
         case ID_MOD_REFRESH: mods_scan(); break;
@@ -1744,7 +1909,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
         }
     }
     if (argc >= 4 && !wcscmp(argv[1], L"--capture")) {
-        static const WCHAR *names[] = { L"play", L"settings", L"mods", L"install" };
+        static const WCHAR *names[] = { L"play", L"settings", L"mods", L"textures", L"install" };
         int i;
         for (i = 0; i < TAB_COUNT; i++)
             if (!_wcsicmp(argv[2], names[i]))

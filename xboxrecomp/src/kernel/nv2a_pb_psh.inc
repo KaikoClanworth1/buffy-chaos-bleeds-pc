@@ -578,6 +578,7 @@ static ID3D11SamplerState *tx_sampler(int st, int has_mips)
     int i, lin_min, lin_mag, lin_mip, use_mip;
 
     if (!has_mips) filt |= 0x80000000u;
+    if (has_mips == 2) filt |= 0x40000000u;
     for (i = 0; i < count; i++)
         if (key[i][0] == addr && key[i][1] == filt && key[i][2] == border)
             return cache[i];
@@ -585,6 +586,11 @@ static ID3D11SamplerState *tx_sampler(int st, int has_mips)
     lin_mag = magf != 1;
     use_mip = has_mips && minf >= 3 && minf <= 6;
     lin_mip = minf == 5 || minf == 6;
+    if (has_mips == 2) {
+        /* A texture-pack replacement, often far larger than the original:
+         * always mipmapped, so drawn at the original size it does not shimmer. */
+        use_mip = lin_mip = 1;
+    }
     memset(&d, 0, sizeof d);
     d.Filter = (D3D11_FILTER)((lin_min ? 0x10 : 0) | (lin_mag ? 0x04 : 0) | (lin_mip ? 0x01 : 0));
     d.AddressU = tx_addr(addr);

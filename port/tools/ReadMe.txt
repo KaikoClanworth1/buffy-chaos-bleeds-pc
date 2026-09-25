@@ -24,6 +24,12 @@ Start with "Buffy Launcher.exe":
             menu has a Co-op page (split screen, friendly fire, ...);
             player 2's Start gives Change Character and Drop Out, and
             their Back button brings them to player 1.
+  Textures  Texture packs, as in Dolphin and PCSX2, in the game folder's
+            textures_replacement\ folder. "Dump textures" saves each
+            texture the game shows, once, as a PNG in dump\; "Load custom
+            textures" replaces a texture with the image in load\ that has
+            the same 16-character code in its name (any size; subfolders
+            are fine). textures_replacement\README.txt explains more.
 
 The game itself is buffy_chaos_bleeds.exe; keep the installed folder together
 (the exe reads default.xbe and the Buffy\ data folder beside it). Saves go to

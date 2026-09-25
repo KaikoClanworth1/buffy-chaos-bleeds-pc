@@ -13,6 +13,7 @@ It also adds:
 - **A launcher** that installs, configures and starts the game.
 - **Mods**: switch them on and off with a checkbox. The mods don't change the game files on disk.
 - **Story co-op**: a second player can join the campaign, in two windows or on a split screen.
+- **Texture packs**: dump the game's textures and load HD replacements, as in Dolphin and PCSX2.
 
 > [!IMPORTANT]
 > **This repository has no game in it.** It holds no disc image, XBE, game data, movies or game code. You need your **own copy of the Xbox game**. Make a disc image of it (`.iso` or `.xiso`), then point the launcher at that image.
@@ -49,6 +50,7 @@ It also adds:
 - [Controls](#controls)
 - [Settings](#settings)
 - [Mods: what each one does](#mods-what-each-one-does)
+- [Texture packs](#texture-packs)
 - [Story co-op guide](#story-co-op-guide)
 - [Building from source](#building-from-source)
 - [Troubleshooting](#troubleshooting)
@@ -195,6 +197,35 @@ Description = What it does, in one or two sentences.
 The launcher's order decides which mod wins if two mods replace the same file. Use **Move up** and **Move down** to change the order. `mods\README.txt` in the installed game has the full details.
 
 </details>
+
+---
+
+## Texture packs
+
+Like Dolphin and PCSX2, the port can **dump** the game's textures and **load** replacements for them. You can use HD remakes, fixes, recolours or whole texture packs. Switch it on in the launcher's **Textures** tab.
+
+<p align="center"><img src="docs/screenshots/launcher-textures.png" alt="Launcher Textures tab" width="60%"></p>
+
+Everything lives in the game folder:
+
+```
+textures_replacement\
+  dump\    the game's textures, saved as you play (when Dump is on)
+  load\    your replacements (when Load is on); subfolders are fine
+```
+
+**Making a pack:**
+
+1. Tick **Dump textures while playing** and play through the parts you want to change. Each texture is saved once, as a PNG, for example `buffy_256x256_049c2d6e895bf871_06.png`.
+2. Copy the ones you want into `load\` and edit them.
+   - **Any size works.** 2× or 4× the original looks sharper, and the port builds the mipmaps for you.
+   - **Keep the 16-character code in the file name.** The rest of the name can change, so `…049c2d6e895bf871_06_HD.png` still matches.
+   - Keep the transparent parts transparent.
+3. Untick **Dump**, tick **Load custom textures**, and play.
+
+**Sharing a pack:** zip your folder from `load\`. Other players unzip it into their own `load\` folder. Tick **Load them all when the game starts** to avoid a small stutter the first time each texture appears; it uses more memory.
+
+> The texture code comes from the texture's contents, not where it sits in memory, so a pack works on every PC and every run.
 
 ---
 

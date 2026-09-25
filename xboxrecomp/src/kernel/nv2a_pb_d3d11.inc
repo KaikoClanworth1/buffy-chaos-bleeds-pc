@@ -59,6 +59,7 @@ typedef struct {
     ID3D11Texture2D          *tex;
     ID3D11ShaderResourceView *srv;
     DWORD    last_use;
+    int      replaced;                     /* a texture pack's image (nv2a_texpack.inc) */
 } GpuTexture;
 
 #define GPU_MAX_SURF 16
@@ -1167,6 +1168,8 @@ static uint32_t tx_level_bytes(uint32_t fmt, uint32_t block, uint32_t w, uint32_
     return w * h * tx_bpp(fmt);
 }
 
+#include "nv2a_texpack.inc"
+
 /* A shader resource for texture stage `st`, or NULL. *norm receives the
  * coordinate multiplier (1 for normalised, 1/size for linear textures, which
  * NV2A addresses in texels); *mips whether it has a mip chain; *cube whether
@@ -1188,6 +1191,8 @@ static ID3D11ShaderResourceView *gpu_texture(int st, float norm[2], int *mips, i
     int npix = 0;
     uint32_t block = d3d8_format_dxt_block_bytes(fmt);
     LARGE_INTEGER tx_t0;
+    uint64_t tp_hash = 0;
+    int tp_want_dump = 0;
 
     norm[0] = norm[1] = 1.0f;
     *mips = 0;
@@ -1257,7 +1262,7 @@ static ID3D11ShaderResourceView *gpu_texture(int st, float norm[2], int *mips, i
                 }
                 t->last_use = now;
                 s_tx_why[4]++;
-                *mips = levels > 1;
+                *mips = t->replaced ? 2 : levels > 1;
                 *cube = is_cube;
                 return t->srv;
             }
@@ -1282,6 +1287,25 @@ reupload:
     t = &s_texc[i];
     if (t->srv) { ID3D11ShaderResourceView_Release(t->srv); t->srv = NULL; }
     if (t->tex) { ID3D11Texture2D_Release(t->tex); t->tex = NULL; }
+    t->replaced = 0;
+
+    /* Texture packs: a replacement from load\, or this one dumped below. */
+    if (!s_tp.inited)
+        tp_init();
+    if (tp_active() && !is_cube) {
+        tp_hash = tp_texture_hash(mem + va, fmt, block, w, h, linear, pitch, pal,
+                                  fmt == 0x0B ? 256u >> ((palreg >> 2) & 3) : 0);
+        if (tp_replacement(tp_hash, &t->tex, &t->srv)) {
+            s_tx_why[5]++;
+            t->offset = off; t->fmt = fmt; t->w = w; t->h = h; t->pitch = pitch;
+            t->levels = levels; t->hash = hash; t->last_use = now; t->checked_frame = s_frame_no;
+            t->replaced = 1;
+            *mips = 2;
+            *cube = 0;
+            return t->srv;
+        }
+        tp_want_dump = s_tp.dump && !tp_dumped(tp_hash, 0);
+    }
 
     QueryPerformanceCounter(&tx_t0);
     memset(&td, 0, sizeof td);
@@ -1320,6 +1344,21 @@ reupload:
             }
             sd->SysMemSlicePitch = 0;
             lo += linear ? pitch * h : tx_level_bytes(fmt, block, lw, lh);
+        }
+    }
+    if (tp_want_dump) {
+        if (td.Format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+            tp_dump(tp_hash, fmt, w, h, pix[0]);          /* face 0, level 0 */
+        } else {
+            uint32_t *px = (uint32_t *)malloc((size_t)w * h * 4), x, y;
+            if (px) {
+                for (y = 0; y < h; y++)
+                    for (x = 0; x < w; x++)
+                        if (!d3d8_dxt_decode_texel(mem + va, fmt, x, y, w, &px[y * w + x]))
+                            px[y * w + x] = 0xFFFF00FFu;
+                tp_dump(tp_hash, fmt, w, h, px);
+                free(px);
+            }
         }
     }
     ID3D11Device_CreateTexture2D(s_dev, &td, sub, &t->tex);

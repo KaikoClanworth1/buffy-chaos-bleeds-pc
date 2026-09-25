@@ -25,6 +25,7 @@
 void nv2a_gpu_set_display(int width, int height, int vsync, int fullscreen);
 void nv2a_gpu_set_display_callback(void (*cb)(int fullscreen));
 void nv2a_gpu_set_frame_widescreen(int wide);
+void nv2a_gpu_set_texture_pack(const wchar_t *root, int dump, int load, int prefetch);
 int  buffy_movie_active(void);
 
 #define G_APP_WIDESCREEN   0x26D764u       /* XApp +0x34: TV is widescreen */
@@ -102,6 +103,19 @@ void buffy_settings_load(void)
         /* [Game], set from the launcher's Settings tab. */
         if (GetPrivateProfileIntA("Game", "SkipIntroMovies", 0, s_path) && !getenv("BUFFY_SKIP_INTRO"))
             _putenv("BUFFY_SKIP_INTRO=1");
+    }
+    {
+        /* [Textures], from the launcher's Textures tab: texture packs in
+         * textures_replacement\ beside the exe (dump\ and load\). */
+        WCHAR root[MAX_PATH], *ws;
+        GetModuleFileNameW(NULL, root, MAX_PATH);
+        ws = wcsrchr(root, L'\\');
+        if (ws)
+            wcscpy_s(ws + 1, MAX_PATH - (ws + 1 - root), L"textures_replacement");
+        nv2a_gpu_set_texture_pack(root,
+                                  s_path[0] && GetPrivateProfileIntA("Textures", "Dump", 0, s_path),
+                                  s_path[0] && GetPrivateProfileIntA("Textures", "Load", 0, s_path),
+                                  s_path[0] && GetPrivateProfileIntA("Textures", "Prefetch", 0, s_path));
     }
     env = getenv("BUFFY_RES");
     if (env) {
