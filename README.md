@@ -17,10 +17,33 @@ It also adds:
 > [!IMPORTANT]
 > **This repository has no game in it.** It holds no disc image, XBE, game data, movies or game code. You need your **own copy of the Xbox game**. Make a disc image of it (`.iso` or `.xiso`), then point the launcher at that image.
 
+> [!NOTE]
+> **This port was made with [Claude Code](https://claude.com/claude-code)**, Anthropic's AI coding assistant. Claude Code wrote most of the port's code, tools and docs, working with the project's human author, who directed, tested and played it. See [Contributors](#contributors).
+
+---
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/title.jpg" alt="Title screen"><br><sub><b>Title screen</b>, at 1080p</sub></td>
+    <td width="50%"><img src="docs/screenshots/main-menu.jpg" alt="Main menu"><br><sub><b>Main menu</b>, the game's own spell-book menu</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/gameplay-1080p.jpg" alt="Gameplay at 1080p"><br><sub><b>The Magic Box</b>, in widescreen at 1080p and 60 fps</sub></td>
+    <td><img src="docs/screenshots/cutscene.jpg" alt="In-game cutscene"><br><sub><b>In-engine cutscene</b></sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/multiplayer.jpg" alt="Multiplayer"><br><sub><b>Multiplayer</b>, with up to four controllers</sub></td>
+    <td><img src="docs/screenshots/coop-split.jpg" alt="Split-screen story co-op"><br><sub><b>Story co-op</b>, on a split screen</sub></td>
+  </tr>
+</table>
+
 ---
 
 ## Contents
 
+- [Screenshots](#screenshots)
 - [What you need](#what-you-need)
 - [Install and play](#install-and-play)
 - [Controls](#controls)
@@ -29,6 +52,7 @@ It also adds:
 - [Story co-op guide](#story-co-op-guide)
 - [Building from source](#building-from-source)
 - [Troubleshooting](#troubleshooting)
+- [Contributors](#contributors)
 - [Legal and credits](#legal-and-credits)
 
 ---
@@ -62,6 +86,13 @@ It also adds:
 5. **Play tab**: press **Play**.
 
 Your saves go to `SaveData\` inside the game folder.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/launcher-install.png" alt="Launcher Install tab"><br><sub><b>Install</b>: choose your disc image and a folder</sub></td>
+    <td width="50%"><img src="docs/screenshots/launcher-play.png" alt="Launcher Play tab"><br><sub><b>Play</b></sub></td>
+  </tr>
+</table>
 
 ```mermaid
 flowchart LR
@@ -110,6 +141,8 @@ You can change these in the launcher's **Settings** tab. The **Resolution** and 
 | **Skip the intro movies** | Goes straight to the title screen. |
 | **Invert camera left / right** | Flips the right stick's horizontal direction. |
 
+<p align="center"><img src="docs/screenshots/launcher-settings.png" alt="Launcher Settings tab" width="60%"></p>
+
 ---
 
 ## Mods: what each one does
@@ -119,6 +152,8 @@ You can change these in the launcher's **Settings** tab. The **Resolution** and 
 </p>
 
 Mods live in the game folder's `mods\` folder. Tick them in the launcher's **Mods** tab and click **Apply mods**. A mod is laid *over* the game files and never written into them, so unticking it removes it completely. **None of these mods change your saves.**
+
+<p align="center"><img src="docs/screenshots/launcher-mods.png" alt="Launcher Mods tab" width="60%"></p>
 
 | Mod | What it does | Works in |
 |---|---|---|
@@ -167,6 +202,18 @@ The launcher's order decides which mod wins if two mods replace the same file. U
 <p align="center">
   <img src="docs/images/coop-screens.svg" alt="Two windows, split screen, or one screen" width="100%">
 </p>
+
+<p align="center">
+  <img src="docs/screenshots/coop-two-windows.jpg" alt="Two windows: player 1 on the left, player 2 on the right" width="100%"><br>
+  <sub><b>Two Windows</b>: player 1's window (left) and player 2's (right), each with its own camera</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/coop-join.jpg" alt="Player 2 picks a character"><br><sub>Player 2 presses <b>Start</b> and picks from all 24 characters</sub></td>
+    <td width="50%"><img src="docs/screenshots/pause-coop.jpg" alt="Pause menu with Co-op and Change Character"><br><sub>Player 1's pause menu, with <b>Co-op</b> and <b>Change Character</b></sub></td>
+  </tr>
+</table>
 
 | To… | Do this |
 |---|---|
@@ -268,10 +315,24 @@ The translated game code is **generated on your machine from your own disc**. It
 
 ---
 
+## Contributors
+
+| | Who | What |
+|---|---|---|
+| 🧑‍💻 | [**KaikoClanworth1**](https://github.com/KaikoClanworth1) | Project lead: direction, design, testing and playing. |
+| 🤖 | [**Claude Code**](https://claude.com/claude-code) (Anthropic) | AI coding assistant: wrote most of the port. That includes the recompiler integration, the Direct3D 11 renderer and runtime fixes, audio, input, movies, the launcher, the mods system and story co-op, plus the tools and this README. |
+| 🛠️ | [**sp00nznet**](https://github.com/sp00nznet) | [xboxrecomp](https://github.com/sp00nznet/xboxrecomp), the static recompiler this port is built on. |
+
+> **AI disclosure:** this port was developed with Claude Code. Its commits carry a `Co-Authored-By: Claude` line. Every change was run and tested on the project lead's own PC.
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md).
+
+---
+
 ## Legal and credits
 
 - This is an unofficial fan project. It isn't affiliated with or endorsed by 20th Century Studios, Vivendi Universal Games, Eurocom or Microsoft. *Buffy the Vampire Slayer* and *Chaos Bleeds* belong to their respective owners.
-- **No copyrighted game material is included**: no disc image, XBE, data, audio, video or translated game code. You must own the game and supply your own disc image.
+- **No game material is included**: no disc image, XBE, data, audio, video or translated game code. You must own the game and supply your own disc image. The screenshots in `docs/screenshots/` were taken of the port running. They're used only to show the port, and they belong to the game's owners.
 - **Recompiler**: [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) by sp00nznet, under the MIT license. See `xboxrecomp/LICENSE` and `xboxrecomp/NOTICE`.
 - **Disassembly**: [Capstone](https://www.capstone-engine.org/).
 - **Movie conversion**: [FFmpeg](https://ffmpeg.org/). It's downloaded separately and isn't bundled.
