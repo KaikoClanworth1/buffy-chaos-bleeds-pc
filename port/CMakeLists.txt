@@ -13,6 +13,13 @@ project(buffy_chaos_bleeds C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Release builds keep full debug info (a .pdb beside the exe), so crash and
+# hang reports name functions; /OPT:REF,ICF keep the exe as small as without.
+if(MSVC)
+    add_compile_options($<$<CONFIG:Release>:/Zi>)
+    add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+endif()
+
 # Common definitions
 add_compile_definitions(
     WIN32_LEAN_AND_MEAN
@@ -45,6 +52,8 @@ set(GAME_SOURCES
     src/buffy_menu.c
     src/buffy_gpuwait.c
     src/buffy_mods.c
+    src/buffy_debug.c
+    src/buffy_native.c
 )
 
 add_executable(${PROJECT_NAME} WIN32

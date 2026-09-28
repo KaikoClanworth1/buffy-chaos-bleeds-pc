@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "recomp/gen/recomp_types.h"
 
@@ -25,6 +26,7 @@
 void D3DDevice_Swap_0013A070_orig(void);
 void buffy_settings_frame(void);
 void buffy_mods_frame(void);
+void xbox_HangMonitorBeat(void);
 
 static void pace_60hz(void)
 {
@@ -74,7 +76,9 @@ void D3DDevice_Swap_0013A070(void)
     /* Two-screen co-op (buffy_mods.c): player 2's frame goes to window 2,
      * unpaced -- it belongs to the same game frame as player 1's. */
     if (buffy_coop_in_pass2()) {
+        void buffy_native_present(void);
         nv2a_gpu_queue_flip(1);
+        buffy_native_present();             /* native mode: player 2's view to its window / half */
         D3DDevice_Swap_0013A070_orig();
         return;
     }
@@ -84,6 +88,38 @@ void D3DDevice_Swap_0013A070(void)
             nv2a_gpu_queue_flip(split ? 0 : 2);     /* player 1 only, or both */
     }
     buffy_frame_note_swap();
+    xbox_HangMonitorBeat();                 /* a frozen game thread gets logged (xbox_memory_layout.c) */
+    if (getenv("RECOMP_VP_STATS")) {
+        static DWORD t0;
+        static unsigned swaps;
+        swaps++;
+        if (GetTickCount() - t0 >= 1000) {
+            fprintf(stderr, "[FRAME] %u swaps/s\n", swaps);
+            swaps = 0;
+            t0 = GetTickCount();
+        }
+    }
+    {
+        void buffy_native_frame(void), buffy_native_check(void);
+        int buffy_native_mode(void);
+        static int checked;
+        if (!checked++) {
+            buffy_native_mode();
+            buffy_native_check();
+        }
+        buffy_native_frame();               /* the native renderer (buffy_native.c) */
+    }
+    {
+        void buffy_native_present(void);
+        buffy_native_present();             /* native mode: its frame to the window */
+    }
+    {
+        /* BUFFY_TEST_STALL=<frame>: sleep 20 s there, to try the hang report */
+        static int frame;
+        const char *st = getenv("BUFFY_TEST_STALL");
+        if (st && ++frame == atoi(st))
+            Sleep(20000);
+    }
     buffy_settings_frame();                 /* widescreen flags, 16:9 or 4:3 frame */
     buffy_mods_frame();
     pace_60hz();

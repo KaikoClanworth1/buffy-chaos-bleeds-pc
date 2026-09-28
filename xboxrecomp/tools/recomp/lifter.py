@@ -3407,7 +3407,14 @@ class Lifter:
             # fprem truncates toward zero, fprem1 rounds to nearest (IEEE), which
             # is the difference between fmod and remainder.
             fn = "fmod" if m == "fprem" else "remainder"
-            return [f"fp_top() = {fn}(fp_top(), fp_st1()); /* {m} */"]
+            # The C call always finishes, so C2 must read clear -- it was left as
+            # whatever the last compare said. MSVC's fmod loops `fprem; fnstsw ax;
+            # sahf; jp again`, and after a compare with a NaN (C2 set, g_fp_cmp 2)
+            # it spun forever: Buffy froze in the cemetery on a head-tracking ray
+            # cast. "Greater" is the all-clear encoding (C3 C2 C0 = 0); the
+            # quotient bits real hardware leaves in C0/C3/C1 are not modelled.
+            return [f"fp_top() = {fn}(fp_top(), fp_st1()); "
+                    f"g_fp_cmp = 1; g_fp_cc = RECOMP_FCMP_CC(1); /* {m}: complete */"]
         if m == "fscale":
             return [f"fp_top() = ldexp(fp_top(), (int)fp_st1()); /* fscale */"]
         if m == "frndint":

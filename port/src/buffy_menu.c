@@ -111,8 +111,8 @@ static void label_for(int e, wchar_t *out, size_t n)
         break;
     case E_VSYNC:      swprintf(out, n, L"VSync  %ls", buffy_settings_vsync() ? L"On" : L"Off"); break;
     case E_FULLSCREEN: swprintf(out, n, L"Fullscreen  %ls", buffy_settings_fullscreen() ? L"On" : L"Off"); break;
-    case E_COOP:       swprintf(out, n, L"           Co-op"); break;   /* (spaces: under the lines' centre) */
-    case E_P1CHANGE:   swprintf(out, n, L"                          Change Character"); break;
+    case E_COOP:       swprintf(out, n, L"Co-op"); break;
+    case E_P1CHANGE:   swprintf(out, n, L"Change Character"); break;
     default:           swprintf(out, n, L"Exit"); break;
     }
 }
@@ -179,6 +179,9 @@ static void add_entry(uint32_t wnd, uint32_t src_tmpl, uint32_t prev_anim, int e
     en->dx = (fget(src_anim + 0xAC) - fget(prev_anim + 0xAC)) * steps;
     en->dy = (fget(src_anim + 0xB0) - fget(prev_anim + 0xB0)) * steps;
     en->dz = (fget(src_anim + 0xB4) - fget(prev_anim + 0xB4)) * steps;
+    if (e == E_COOP || e == E_P1CHANGE)
+        en->dx = en->dz = 0.0f;   /* straight down: the pause page's line models have their own origins,
+                                     so their step sideways is not a slant to follow */
     sync_anim(en);
 
     for (i = 0; i < BTN_SIZE; i += 4)
@@ -261,6 +264,137 @@ static void gothic(uint32_t btn)
         MEMF(btn + 0x50) = t[2];
         MEMF(btn + 0x54) = t[3];
     }
+}
+
+/* The gothic font's texture record (0x4C bytes; EXBaseWnd::SelectFont's
+ * lookup), or 0. */
+static uint32_t gothic_texrec(void)
+{
+    void EXGeoFile_GetGeoFile_000C6960(void);
+    void EXGeoCommonArray_FindIndex_000CBFB0(void);
+    uint32_t esp0 = g_esp, ecx0 = g_ecx, geo, hdr, arr, ent, font, idx, tbl;
+    int i;
+    g_esp -= 4; MEM32(g_esp) = MEM32(0x1B7F68);
+    g_esp -= 4; MEM32(g_esp) = 0;
+    EXGeoFile_GetGeoFile_000C6960();
+    g_esp = esp0;
+    geo = g_eax;
+    if (!geo || !(hdr = MEM32(geo + 0x28))) { g_ecx = ecx0; return 0; }
+    arr = hdr + 0xB4;
+    g_esp -= 4; MEM32(g_esp) = 0x10;
+    g_esp -= 4; MEM32(g_esp) = arr;
+    g_esp -= 4; MEM32(g_esp) = 0x07000005u;
+    g_esp -= 4; MEM32(g_esp) = 0;
+    EXGeoCommonArray_FindIndex_000CBFB0();
+    g_esp = esp0;
+    g_ecx = ecx0;
+    i = (int)g_eax;
+    if (i < 0 || !MEM32(arr + 4))
+        return 0;
+    ent = MEM32(arr + 4) + arr + 4 + (uint32_t)i * 16;
+    font = MEM32(ent + 0xC);
+    if (!font)
+        return 0;
+    idx = MEM32(font);
+    tbl = MEM32(MEM32(hdr + 0x48) + 4);
+    return MEM32(tbl + (idx >> 6) * 4) + (idx & 63) * 0x4C;
+}
+
+/* ── ivory lettering for the pause page ──────────────────────────────────
+ * The pause page's own lines are drawn artwork, flat ivory with a dark edge;
+ * the gothic font is gold with a bevel, and no tint gets from one to the
+ * other (the game's text colour scales green by the blue factor, so the two
+ * cannot be set apart, and nothing brightens past the texture). So Co-op and
+ * Change Character are drawn from an ivory copy of the font's texture. Text
+ * is batched and drawn at the end of its window's redraw, so the font's D3D
+ * header points at the copy from the first of those lines until that redraw
+ * is over (buffy_menu_ivory_restore, from EXBaseDisplay::RedrawWindow in
+ * buffy_mods.c). Nothing else on player 1's pause page uses the gothic font. */
+
+#define XBOX_CONTIG_BASE 0x80000000u
+uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
+
+/* One RGB565 colour: gold fill -> flat ivory, darker texels in proportion
+ * (the edge stays dark). */
+static uint16_t ivory565(uint16_t c)
+{
+    static const float iv[3] = { 255.0f, 250.0f, 206.0f };
+    float r = (float)((c >> 11) & 31) * 255.0f / 31.0f;
+    float g = (float)((c >> 5) & 63) * 255.0f / 63.0f;
+    float b = (float)(c & 31) * 255.0f / 31.0f;
+    float t = (0.3f * r + 0.59f * g + 0.11f * b) / 175.0f;
+    if (t > 1.0f)
+        t = 1.0f;
+    return (uint16_t)(((uint32_t)(iv[0] * t * 31.0f / 255.0f + 0.5f) << 11) |
+                      ((uint32_t)(iv[1] * t * 63.0f / 255.0f + 0.5f) << 5) |
+                      (uint32_t)(iv[2] * t * 31.0f / 255.0f + 0.5f));
+}
+
+/* The physical address of an ivory copy of DXT3 texture `res` (one copy per
+ * source, kept), or 0. */
+static uint32_t ivory_texels(uint32_t res)
+{
+    static uint32_t s_src[4], s_copy[4];
+    uint32_t data = MEM32(res + 4), fmt = MEM32(res + 0xC), w, h, levels, l, bytes = 0, va, i;
+    int k;
+    for (k = 0; k < 4 && s_src[k]; k++)
+        if (s_src[k] == data)
+            return s_copy[k];
+    if (k == 4 || ((fmt >> 8) & 0xFF) != 0x0E || !data)          /* DXT3 */
+        return 0;
+    w = 1u << ((fmt >> 20) & 0xF);
+    h = 1u << ((fmt >> 24) & 0xF);
+    levels = (fmt >> 16) & 0xF;
+    if (!levels) levels = 1;
+    for (l = 0; l < levels; l++) {
+        uint32_t lw = w >> l ? w >> l : 1, lh = h >> l ? h >> l : 1;
+        bytes += ((lw + 3) / 4) * ((lh + 3) / 4) * 16;
+    }
+    s_src[k] = data;
+    va = xbox_ContiguousAlloc(bytes, 4096);
+    if (!va)
+        return 0;
+    for (i = 0; i < bytes; i += 4)
+        MEM32(va + i) = MEM32(XBOX_CONTIG_BASE + data + i);
+    for (i = 0; i < bytes; i += 16) {                   /* 8 bytes alpha, then c0 c1 */
+        MEM16(va + i + 8) = ivory565(MEM16(va + i + 8));
+        MEM16(va + i + 10) = ivory565(MEM16(va + i + 10));
+    }
+    s_copy[k] = va - XBOX_CONTIG_BASE;
+    if (getenv("BUFFY_MENU_LOG"))
+        fprintf(stderr, "[MENU] ivory font: %ux%u x%u levels, %u bytes at %08X\n", w, h, levels, bytes, s_copy[k]);
+    return s_copy[k];
+}
+
+static uint32_t s_swap_res, s_swap_data;   /* the font header while it points at the ivory texels */
+
+/* After a window's redraw (its text drawn): the font's own texels again. */
+void buffy_menu_ivory_restore(void)
+{
+    if (s_swap_res) {
+        MEM32(s_swap_res + 4) = s_swap_data;
+        s_swap_res = 0;
+    }
+}
+
+/* Draw one of our pause lines (after sync_anim): ivory, full brightness
+ * when highlighted, as the page's own lines are. */
+static void ivory_line_draw(uint32_t btn, Entry *en)
+{
+    uint32_t a = en->anim, rec, iv;
+    int lit = ((MEM32(btn + 8) | MEM32(btn + 0xC) | MEM32(btn + 0x10) | MEM32(btn + 0x14)) & 1) != 0;
+    float k = lit ? 1.0f : 0.875f;
+    if (MEM32(btn + 0x94) == 0x07000005u && MEM32(btn + 0x1C) && MEM32(MEM32(btn + 0x1C) + 0x174) == 0x04000184u
+        && !getenv("BUFFY_NO_IVORY") && (rec = gothic_texrec()) != 0 && (iv = ivory_texels(rec + 0x2C)) != 0) {
+        fset(a + 0x48, 1.0f); fset(a + 0x4C, 1.0f); fset(a + 0x50, 1.0f);
+        MEMF(btn + 0x48) = k; MEMF(btn + 0x4C) = k; MEMF(btn + 0x50) = k;
+        if (!s_swap_res) {
+            s_swap_res = rec + 0x2C;
+            s_swap_data = MEM32(s_swap_res + 4);
+            MEM32(s_swap_res + 4) = iv;
+        }
+    }
+    XHudScriptButton_Draw_00047DC0_orig();
 }
 
 /* A line's text, from a string of ours (kept in a guest buffer per line). */
@@ -495,8 +629,13 @@ void XHudScriptButton_Draw_00047DC0(void)
         return;
     }
     int e = (int)(type - TYPE_OURS(0));
-    if (type >= TYPE_OURS(0) && e < E_COUNT && MEM32(btn + 0x24) == s_e[e].anim)
+    if (type >= TYPE_OURS(0) && e < E_COUNT && MEM32(btn + 0x24) == s_e[e].anim) {
         sync_anim(&s_e[e]);
+        if (e == E_COOP || e == E_P1CHANGE) {
+            ivory_line_draw(btn, &s_e[e]);
+            return;
+        }
+    }
     if (type == 0x4600007Cu && s_coop_wnd && MEM32(btn + 0x1C) == s_coop_wnd && MEM32(btn + 0x24)) {
         /* the pause page's "Press START to continue", a line lower to make
          * room for Co-op */

@@ -44,6 +44,12 @@ the first is player 1 (together with the keyboard), the next player 2, and
 so on, for multiplayer. Rumble goes to each player's own pad (set BUFFY_NO_RUMBLE=1 to turn rumble off). LB/RB are the Xbox's
 Black/White buttons.
 
+Renderer: the native Direct3D 11 renderer draws the game's own Direct3D
+calls and is the default. The emulated renderer (it emulates the Xbox GPU
+from its command stream) is still there as a fallback: set Renderer to
+"Emulated" in the launcher's Settings, or [Display] Renderer=emulated in
+buffy_settings.ini, or BUFFY_RENDERER=emulated.
+
 Current state: boots to the title screen and main menu with graphics (Direct3D
 11) and sound (Windows DirectSound). Movies play with sound from the
 Movies folder; press Start to skip one (BUFFY_SKIP_MOVIES=1 skips all). Xbox pixel shaders (register combiners),
@@ -66,5 +72,12 @@ PC options (in the game's own menus):
   Alt+Enter or F11 switches between a window and borderless fullscreen.
   These are saved in buffy_settings.ini beside the exe.
 
-If the game closes unexpectedly, buffy_log.txt beside the exe records why. Frame rate is shown in the window title.
+Bug reports: click the left stick (any controller) or press F12 while
+playing, and the game saves a folder in bug_reports\ beside the exe: a
+screenshot, what the game is doing (level, players, settings, mods) and the
+log. It works even if the game has frozen. The launcher's Play tab opens the
+folder; Settings can turn the button off.
+If the game closes unexpectedly, buffy_log.txt beside the exe records why
+(the run before that is kept as buffy_log_previous.txt); if it freezes for 15
+seconds, where it is stuck goes into the log too. Frame rate is shown in the window title.
 Closing the window quits the game.

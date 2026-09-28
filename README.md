@@ -9,7 +9,7 @@ This is a native Windows port of the 2003 Xbox game *Buffy the Vampire Slayer: C
 It also adds:
 
 - **Sharp resolutions**: 720p, 1080p, 1440p and 4K, plus the original 4:3 sizes.
-- **A steady 60 fps**, with VSync on or off.
+- **A steady 60 fps**, with VSync on or off, from a native Direct3D 11 renderer with plenty of headroom.
 - **A launcher** that installs, configures and starts the game.
 - **Mods**: switch them on and off with a checkbox. The mods don't change the game files on disk.
 - **Story co-op**: a second player can join the campaign, in two windows or on a split screen.
@@ -129,6 +129,14 @@ Up to **four** XInput controllers work, in any USB or wireless slot. The first c
 - Closing the window quits the game.
 - The window title shows the frame rate.
 
+**Bug reports:** click the **left stick** or press **F12** to save a bug report. The game creates a folder in `bug_reports\` holding:
+
+- a screenshot of the screen
+- a text report of what the game is doing: the level, the players, your settings, your mods, and exactly where the game's code is
+- the log
+
+It works even if the game has frozen. Attach the folder when you report a problem. You can open the folder from the launcher's **Play** tab, and switch the button off in **Settings**.
+
 ---
 
 ## Settings
@@ -140,6 +148,7 @@ You can change these in the launcher's **Settings** tab. The **Resolution** and 
 | **Windowed / Fullscreen** | Fullscreen is borderless. |
 | **Resolution** | 1920×1080 is the default. 1280×720, 2560×1440 and 3840×2160 are also 16:9. The original 4:3 sizes are 640×480, 1280×960, 1920×1440 and 2560×1920. Menus and movies stay 4:3, with bars at the sides. |
 | **VSync** | Waits for the monitor's refresh, so the picture doesn't tear. |
+| **Renderer** | **Native Direct3D 11** (the default) draws the game's Direct3D calls directly and is much faster. **Emulated Xbox GPU** is the older renderer that emulates the Xbox graphics chip. Keep it as a fallback if something looks wrong, and please report it. |
 | **Widescreen: keep the original side-to-side view** | On by default. It shows the original view with the top and bottom trimmed, which avoids pop-in and clipping at the edges of the screen. Untick it for the game's own wider view. |
 | **Skip the intro movies** | Goes straight to the title screen. |
 | **Invert camera left / right** | Flips the right stick's horizontal direction. |
@@ -343,6 +352,7 @@ The translated game code is **generated on your machine from your own disc**. It
 - **The launcher says the disc image isn't Chaos Bleeds.** Only the **Xbox** version is supported, and the image must be a full disc image, not just the game partition.
 - **There are no cutscene movies.** FFmpeg wasn't available during install. Get FFmpeg, then install again with **Convert the game's movies** ticked.
 - **The game closed unexpectedly.** `buffy_log.txt` beside the exe records why. Please include it when you report a problem.
+- **Something is drawn wrong** (missing or odd-looking graphics). In the launcher's **Settings**, set **Renderer** to **Emulated Xbox GPU** and see if it looks right there. Either way, save a bug report (click the left stick or press F12) and send it in.
 - **Player 2's window is missing.** On player 1's pause menu, go to **Co-op**, then **Screens**, and choose **Two Windows** again. The window opens on the primary screen, and you can drag it from there.
 
 ---

@@ -49,3 +49,5 @@ __pycache__/
 Thumbs.db
 .DS_Store
 textures_replacement/
+bug_reports/
+buffy_log_previous.txt

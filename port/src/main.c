@@ -483,7 +483,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             GetModuleFileNameA(NULL, path, MAX_PATH);
             slash = strrchr(path, '\\');
             if (slash) {
+                char prev[MAX_PATH];
                 strcpy_s(slash + 1, MAX_PATH - (slash + 1 - path), "buffy_log.txt");
+                /* the last run's log stays, as buffy_log_previous.txt: restarting
+                 * after a freeze or crash must not wipe the one that says why */
+                strcpy_s(prev, MAX_PATH, path);
+                strcpy_s(prev + (slash + 1 - path), MAX_PATH - (slash + 1 - path), "buffy_log_previous.txt");
+                MoveFileExA(path, prev, MOVEFILE_REPLACE_EXISTING);
                 freopen(path, "w", stderr);
                 strcpy_s(slash + 1, MAX_PATH - (slash + 1 - path), "buffy_out.txt");
                 freopen(path, "w", stdout);
@@ -525,6 +531,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             && !getenv("RECOMP_FB_WINDOW") && !getenv("BUFFY_NO_WINDOW"))
         _putenv("RECOMP_FB_WINDOW=1");
     buffy_settings_load();          /* resolution, vsync, fullscreen */
+    {
+        void buffy_debug_start(void);
+        buffy_debug_start();        /* left stick / F12: bug report (buffy_debug.c) */
+    }
+    {
+        int buffy_native_mode(void);
+        buffy_native_mode();        /* native renderer: the device comes up now (buffy_native.c) */
+    }
     {
         void buffy_mods_load(void);
         buffy_mods_load();          /* ticked mods overlay the game folder */

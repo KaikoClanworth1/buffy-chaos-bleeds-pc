@@ -222,6 +222,12 @@ void xbox_ProtectMirrorsForDebug(void);
  * RECOMP_WATCHDOG_SECS seconds. Call from the thread that runs guest code;
  * does nothing unless that variable is set. */
 void xbox_WatchdogStart(void);
+/* Once a frame, from the game thread: feeds the hang monitor (see .c). */
+void xbox_HangMonitorBeat(void);
+long xbox_HangMonitorFrames(void);
+unsigned long xbox_HangMonitorIdleMs(void);
+/* The watchdog's report into `out` (a FILE *), nothing stopped. */
+void xbox_WatchdogReportTo(void *out, const char *why);
 
 /* Print the globals named by RECOMP_PEEK, tagged with `label`. No-op when
  * RECOMP_PEEK is unset. Called at a hang and at an early exit. */

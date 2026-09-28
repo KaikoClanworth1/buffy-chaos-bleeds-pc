@@ -70,5 +70,19 @@
   "0x0002D640": "wrap:XApp_CreatePauseMenu_0002D640",
   "0x00082E00": "wrap:XItemHandler_Player_ApplyHit_00082E00",
   "0x000E7080": "wrap:EXCamera_UpdateDisplay_000E7080",
-  "0x0004FEA0": "wrap:XHudScriptWnd_Draw_0004FEA0"
+  "0x0004FEA0": "wrap:XHudScriptWnd_Draw_0004FEA0",
+  "0x0013A940": "wrap:D3DDevice_DrawIndexedVertices_0013A940",
+  "0x0013A7D0": "wrap:D3DDevice_DrawVerticesUP_0013A7D0",
+  "0x0013ABE0": "wrap:D3DDevice_Begin_0013ABE0",
+  "0x001354E0": "wrap:D3DDevice_BeginPush_001354E0",
+  "0x0013A350": "wrap:D3DDevice_Clear_0013A350",
+  "0x001387A0": "wrap:D3DDevice_SetRenderTarget_001387A0",
+  "0x00137D70": "wrap:D3DDevice_LoadVertexShader_00137D70",
+  "0x00137AC0": "wrap:D3DDevice_SetVertexShaderConstant1Fast_00137AC0",
+  "0x00137BC0": "wrap:D3DDevice_SetVertexShaderConstantNotInlineFast_00137BC0",
+  "0x00137B10": "wrap:D3DDevice_SetVertexShaderConstant4_00137B10",
+  "0x00138500": "wrap:D3DDevice_SwitchTexture_00138500",
+  "0x00137E70": "wrap:D3DDevice_SetShaderConstantMode_00137E70",
+  "0x00135500": "wrap:D3DDevice_EndPush_00135500",
+  "0x00138AB0": "wrap:D3DDevice_SetViewport_00138AB0"
 }

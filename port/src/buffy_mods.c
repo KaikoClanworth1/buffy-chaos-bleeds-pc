@@ -1156,6 +1156,10 @@ void EXBaseDisplay_RedrawWindow_000D7290(void)
     /* (both health bars show in both windows, player 1's over player 2's,
      * so each can keep an eye on the other) */
     EXBaseDisplay_RedrawWindow_000D7290_orig();
+    {
+        void buffy_menu_ivory_restore(void);
+        buffy_menu_ivory_restore();
+    }
 }
 
 /* ── player 2 dying ───────────────────────────────────────────────────────
@@ -2005,4 +2009,22 @@ void coop_set_screens_test(int v)
 {
     fprintf(stderr, "[MODS] co-op: (test) Screens -> %d\n", v);
     coop_set_screens(v);
+}
+
+/* For bug reports (buffy_debug.c): the ticked mods and the co-op state. */
+void buffy_mods_debug_report(FILE *f)
+{
+    int i;
+    fprintf(f, "mods ticked: %d\n", s_count);
+    for (i = 0; i < s_count; i++)
+        fwprintf(f, L"  %s\n", s_dirs[i]);
+    fprintf(f, "story co-op %s, player 1 change character %s, multiplayer %s\n",
+            s_story_coop ? "on" : "off", s_p1_change ? "on" : "off", in_multiplayer() ? "yes" : "no");
+    if (s_story_coop)
+        fprintf(f, "co-op: screens %d (1 one, 2 two windows, 3 split), player 2 %s (row %d), "
+                   "friendly fire %d, shared inventory %d, back brings player 2 %d, respawn %ds\n",
+                s_screens, MEM32(0x26DC58) ? "in" : "not in", s_p2_row, s_friendly_fire, s_share_inventory,
+                s_teleport_on_back, s_respawn_secs);
+    fprintf(f, "paused: %s; join page open: %s\n",
+            s_xapp && MEM32(s_xapp + 0x84) ? "yes" : "no", s_join_wnd ? (s_join_who ? "player 2's" : "player 1's") : "no");
 }

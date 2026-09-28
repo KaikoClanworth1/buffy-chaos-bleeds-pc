@@ -1371,19 +1371,19 @@ void xbox_PeekSample(const char *label)
     fflush(stderr);
 }
 
-static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
+/* Where the guest thread is, and every other thread: the watchdog's report,
+ * shared by the timed watchdog (RECOMP_WATCHDOG_SECS, which then exits) and
+ * the hang monitor (which does not). */
+static void watchdog_report(FILE *out, const char *why)
 {
     const uint8_t *mem;
     uint32_t esp, i;
 
-    (void)unused;
-    Sleep(s_watchdog_secs * 1000u);
-
     mem = (const uint8_t *)g_memory_offset;
     esp = s_watchdog_esp ? *s_watchdog_esp : 0;
-    fprintf(stderr, "[WATCHDOG] no exit after %us; guest esp=0x%08X\n"
+    fprintf(out, "[WATCHDOG] %s; guest esp=0x%08X\n"
             "  regs: eax=%08X ecx=%08X edx=%08X ebx=%08X esi=%08X edi=%08X\n",
-            s_watchdog_secs, esp,
+            why, esp,
             s_watchdog_regs[0] ? *s_watchdog_regs[0] : 0,
             s_watchdog_regs[1] ? *s_watchdog_regs[1] : 0,
             s_watchdog_regs[2] ? *s_watchdog_regs[2] : 0,
@@ -1398,13 +1398,13 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
         /* The running indirect-call total separates a hang from mere
          * slowness. Kernel calls cannot: a pure CPU loop makes none, so
          * "same count at 20s and 60s" proves nothing about it. */
-        fprintf(stderr, "  icalls so far: %llu\n",
+        fprintf(out, "  icalls so far: %llu\n",
                 (unsigned long long)g_icall_count);
-        fprintf(stderr, "  recent ICALL targets:");
+        fprintf(out, "  recent ICALL targets:");
         for (k = 0; k < 16; k++)
-            fprintf(stderr, " %08X",
+            fprintf(out, " %08X",
                     g_icall_trace[(g_icall_trace_idx + k) & 15]);
-        fprintf(stderr, "\n");
+        fprintf(out, "\n");
     }
     /* Guest globals worth seeing at the moment of the hang.
      *
@@ -1413,7 +1413,8 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
      * makes no kernel calls is invisible to RECOMP_KERNEL_WATCH too. A pure
      * CPU loop polling a global is exactly the case neither of those covers.
      */
-    xbox_PeekSample("peek");
+    if (out == stderr)
+        xbox_PeekSample("peek");
     /* The pushbuffer pointers, unconditionally.
      *
      * "Extend the table as more handshakes turn up -- run the title and the
@@ -1431,7 +1432,7 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
     if (g_nv2a_memory) {
         const char *r = (const char *)g_nv2a_memory;
 #define WD_NV2A(off) (*(const volatile uint32_t *)(r + (off)))
-        fprintf(stderr, "  NV2A USER  PUT=%08X GET=%08X\n"
+        fprintf(out, "  NV2A USER  PUT=%08X GET=%08X\n"
                         "  NV2A PFIFO PUT=%08X GET=%08X REF=%08X SUBR=%08X\n",
                 WD_NV2A(NV2A_USER_DMA_PUT), WD_NV2A(NV2A_USER_DMA_GET),
                 WD_NV2A(NV2A_PFIFO_DMA_PUT), WD_NV2A(NV2A_PFIFO_DMA_GET),
@@ -1466,11 +1467,11 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
             sym->SizeOfStruct = sizeof(SYMBOL_INFO);
             sym->MaxNameLen = 255;
             if (SymFromAddr(GetCurrentProcess(), c.Rip, &disp, sym))
-                fprintf(stderr, "  host rip sample%s: %s+0x%llX\n",
+                fprintf(out, "  host rip sample%s: %s+0x%llX\n",
                         th == s_watchdog_thread ? "" : " (nv2a thread)",
                         sym->Name, (unsigned long long)disp);
             else
-                fprintf(stderr, "  host rip sample%s: 0x%llX\n",
+                fprintf(out, "  host rip sample%s: 0x%llX\n",
                         th == s_watchdog_thread ? "" : " (nv2a thread)",
                         (unsigned long long)c.Rip);
             Sleep(37);
@@ -1490,7 +1491,7 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
                 if (f) {
                     fwrite(mem + va, 1, len, f);
                     fclose(f);
-                    fprintf(stderr, "  dumped 0x%lX bytes at 0x%08lX to %s\n", len, va, e2 + 1);
+                    fprintf(out, "  dumped 0x%lX bytes at 0x%08lX to %s\n", len, va, e2 + 1);
                 }
             }
         }
@@ -1525,10 +1526,10 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
                 sym->SizeOfStruct = sizeof(SYMBOL_INFO);
                 sym->MaxNameLen = 255;
                 if (SymFromAddr(GetCurrentProcess(), c.Rip, &disp, sym))
-                    fprintf(stderr, "  thread %5lu: %s+0x%llX\n", te.th32ThreadID,
+                    fprintf(out, "  thread %5lu: %s+0x%llX\n", te.th32ThreadID,
                             sym->Name, (unsigned long long)disp);
                 else
-                    fprintf(stderr, "  thread %5lu: 0x%llX\n", te.th32ThreadID,
+                    fprintf(out, "  thread %5lu: 0x%llX\n", te.th32ThreadID,
                             (unsigned long long)c.Rip);
             } while (Thread32Next(snap, &te));
         }
@@ -1539,24 +1540,133 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
     for (i = 0; i < 400 && esp; i++) {
         uint32_t a = esp + i * 4;
         if (a < XBOX_STACK_BASE || a >= XBOX_STACK_TOP) break;
-        fprintf(stderr, "    GS %08X %08X\n", a,
+        fprintf(out, "    GS %08X %08X\n", a,
                 *(const uint32_t *)(mem + a));
     }
-    fflush(stderr);
+    fflush(out);
+}
+
+static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
+{
+    char why[64];
+    (void)unused;
+    Sleep(s_watchdog_secs * 1000u);
+    sprintf_s(why, sizeof why, "no exit after %us", s_watchdog_secs);
+    watchdog_report(stderr, why);
     _exit(3);
+    return 0;
+}
+
+/* The hang monitor. The game calls xbox_HangMonitorBeat once a frame; if the
+ * beats stop for RECOMP_HANG_SECS (15 by default) the report above goes to the
+ * log, once per stall, and the game is left alone -- a player's frozen screen
+ * then says where the game thread is. RECOMP_HANG_SECS=0 turns it off. */
+static volatile LONG s_hang_beats;
+static volatile DWORD s_hang_last_tick;
+
+void xbox_HangMonitorBeat(void)
+{
+    InterlockedIncrement(&s_hang_beats);
+    s_hang_last_tick = GetTickCount();
+}
+
+/* Frames so far, and milliseconds since the last one (for bug reports). */
+long xbox_HangMonitorFrames(void) { return (long)s_hang_beats; }
+unsigned long xbox_HangMonitorIdleMs(void)
+{
+    return s_hang_last_tick ? GetTickCount() - s_hang_last_tick : 0;
+}
+
+/* The watchdog's report (where the game thread is, every thread, the guest
+ * stack) into `out`, without stopping anything. */
+void xbox_WatchdogReportTo(void *out, const char *why)
+{
+    watchdog_report((FILE *)out, why);
+}
+
+static DWORD WINAPI xbox_hang_monitor_thread(LPVOID arg)
+{
+    unsigned secs = (unsigned)(uintptr_t)arg, still = 0;
+    LONG last = -1;
+    int reported = 0;
+    for (;;) {
+        LONG now;
+        Sleep(1000);
+        now = s_hang_beats;
+        if (now != last || now == 0) {             /* moving, or not yet in the frame loop */
+            last = now;
+            still = 0;
+            reported = 0;
+            continue;
+        }
+        if (++still >= secs && !reported) {
+            char why[80];
+            sprintf_s(why, sizeof why, "game thread stalled for %us (frame %ld)", still, (long)now);
+            watchdog_report(stderr, why);
+            reported = 1;
+        }
+    }
+}
+
+/* RECOMP_PROFILE=<start secs>:<secs>: sample the guest thread's host RIP
+ * every millisecond for that long, then print the busiest functions (by
+ * symbol). A cheap stand-in for a profiler when chasing frame time. */
+static DWORD WINAPI xbox_profile_thread(LPVOID arg)
+{
+    const char *spec = (const char *)arg;
+    unsigned start = (unsigned)atoi(spec), secs = strchr(spec, ':') ? (unsigned)atoi(strchr(spec, ':') + 1) : 10;
+    enum { NSYM = 4096 };
+    static char names[NSYM][96];
+    static unsigned counts[NSYM];
+    unsigned n = 0, total = 0, i, j;
+    DWORD t_end;
+    Sleep(start * 1000u);
+    t_end = GetTickCount() + secs * 1000u;
+    timeBeginPeriod(1);
+    while ((int)(t_end - GetTickCount()) > 0 && s_watchdog_thread) {
+        CONTEXT c;
+        char sbuf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO *sym = (SYMBOL_INFO *)sbuf;
+        DWORD64 disp = 0;
+        const char *name = "?";
+        memset(&c, 0, sizeof c);
+        c.ContextFlags = CONTEXT_CONTROL;
+        if (SuspendThread(s_watchdog_thread) == (DWORD)-1)
+            break;
+        GetThreadContext(s_watchdog_thread, &c);
+        ResumeThread(s_watchdog_thread);
+        memset(sbuf, 0, sizeof sbuf);
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 255;
+        if (SymFromAddr(GetCurrentProcess(), c.Rip, &disp, sym))
+            name = sym->Name;
+        for (i = 0; i < n && strcmp(names[i], name); i++) ;
+        if (i == n && n < NSYM) {
+            strncpy(names[n], name, 95);
+            n++;
+        }
+        if (i < n) counts[i]++;
+        total++;
+        Sleep(1);
+    }
+    fprintf(stderr, "[PROFILE] %u samples over %us:\n", total, secs);
+    for (j = 0; j < 30; j++) {
+        unsigned best = 0, bi = 0;
+        for (i = 0; i < n; i++)
+            if (counts[i] > best) { best = counts[i]; bi = i; }
+        if (!best) break;
+        fprintf(stderr, "  %5.1f%%  %s\n", 100.0 * best / (total ? total : 1), names[bi]);
+        counts[bi] = 0;
+    }
+    fflush(stderr);
     return 0;
 }
 
 void xbox_WatchdogStart(void)
 {
-    const char *secs = getenv("RECOMP_WATCHDOG_SECS");
+    const char *secs = getenv("RECOMP_WATCHDOG_SECS"), *hang = getenv("RECOMP_HANG_SECS");
+    unsigned hang_secs = hang && *hang ? (unsigned)atoi(hang) : 15u;
     HANDLE h;
-
-    if (!secs || !*secs)
-        return;
-    s_watchdog_secs = (unsigned)atoi(secs);
-    if (!s_watchdog_secs)
-        return;
 
     /* Taken on the guest thread: g_esp is thread-local, so the watchdog has to
      * be handed the address of the one that matters rather than reading its
@@ -1568,6 +1678,18 @@ void xbox_WatchdogStart(void)
     DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
                     &s_watchdog_thread, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT,
                     FALSE, 0);
+    if (hang_secs) {
+        h = CreateThread(NULL, 0, xbox_hang_monitor_thread, (LPVOID)(uintptr_t)hang_secs, 0, NULL);
+        if (h)
+            CloseHandle(h);
+    }
+    if (getenv("RECOMP_PROFILE")) {
+        h = CreateThread(NULL, 0, xbox_profile_thread, (LPVOID)getenv("RECOMP_PROFILE"), 0, NULL);
+        if (h)
+            CloseHandle(h);
+    }
+    if (!secs || !*secs || !(s_watchdog_secs = (unsigned)atoi(secs)))
+        return;
     h = CreateThread(NULL, 0, xbox_watchdog_thread, NULL, 0, NULL);
     if (h)
         CloseHandle(h);

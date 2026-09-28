@@ -17,6 +17,7 @@
  *
  * Command line (tests):  --capture <play|settings|mods|textures|install> <file.bmp>
  *                        --install <image> <folder>   (no window; exit code)
+ *                        --icon <folder>              (the game exe's icon; exit code)
  */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -47,7 +48,7 @@
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' " \
                         "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-#define LAUNCHER_VERSION  L"1.1"
+#define LAUNCHER_VERSION  L"1.3"
 #define GAME_TITLE        L"Buffy the Vampire Slayer: Chaos Bleeds"
 #define GAME_EXE          L"buffy_chaos_bleeds.exe"
 #define TITLE_ID          0x56550005u   /* from the disc's default.xbe certificate */
@@ -60,9 +61,9 @@ enum { TAB_PLAY, TAB_SETTINGS, TAB_MODS, TAB_TEXTURES, TAB_INSTALL, TAB_COUNT };
 enum {
     ID_TAB = 100,
     /* play */
-    ID_GAMEDIR, ID_GAMEDIR_CHANGE, ID_PLAY, ID_CLOSE_ON_PLAY, ID_PLAY_STATUS, ID_VERSION,
+    ID_GAMEDIR, ID_GAMEDIR_CHANGE, ID_PLAY, ID_CLOSE_ON_PLAY, ID_PLAY_STATUS, ID_VERSION, ID_REPORTS_OPEN,
     /* settings */
-    ID_WINDOWED, ID_FULLSCREEN, ID_RESOLUTION, ID_VSYNC, ID_SKIP_INTRO, ID_WS_SAFE, ID_INVERT_X, ID_DEFAULTS, ID_SAVE,
+    ID_WINDOWED, ID_FULLSCREEN, ID_RESOLUTION, ID_VSYNC, ID_SKIP_INTRO, ID_WS_SAFE, ID_INVERT_X, ID_REPORT_BTN, ID_RENDERER, ID_DEFAULTS, ID_SAVE,
     ID_SETTINGS_STATUS,
     /* mods */
     ID_MODLIST, ID_MOD_DESC, ID_MOD_UP, ID_MOD_DOWN, ID_MOD_OPEN, ID_MOD_REFRESH, ID_MOD_APPLY,
@@ -233,28 +234,44 @@ static void dxt1_block(const uint8_t *b, uint32_t out[16])
         out[i] = pal[(bits >> (i * 2)) & 3];
 }
 
-static HICON load_game_icon(const WCHAR *game_dir)
+/* The 128x128 image as 0xAARRGGBB, top row first; 0 if it isn't there. */
+static int icon_pixels(const WCHAR *game_dir, uint32_t *px)
 {
     WCHAR p[MAX_PATH];
     HANDLE f;
     uint8_t buf[0x2800];
     DWORD got = 0;
-    uint32_t *px;
+    int bx, by, i;
+
+    join(p, game_dir, L"Buffy\\Binary\\_bin_xb\\buffytitle.xbx");
+    f = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE)
+        return 0;
+    ReadFile(f, buf, sizeof buf, &got, NULL);
+    CloseHandle(f);
+    if (got < 0x2800 || memcmp(buf, "XPR0", 4) || ((buf[0x19]) != 0x0C))
+        return 0;
+    for (by = 0; by < 32; by++)
+        for (bx = 0; bx < 32; bx++) {
+            uint32_t blk[16];
+            dxt1_block(buf + 0x800 + (by * 32 + bx) * 8, blk);
+            for (i = 0; i < 16; i++)
+                px[(by * 4 + i / 4) * 128 + bx * 4 + i % 4] = blk[i];
+        }
+    return 1;
+}
+
+static HICON load_game_icon(const WCHAR *game_dir)
+{
+    static uint32_t img[128 * 128];
     BITMAPV5HEADER bh;
     HBITMAP color, mask;
     ICONINFO ii;
     HICON ic = NULL;
     HDC dc;
     void *bits = NULL;
-    int bx, by, i;
 
-    join(p, game_dir, L"Buffy\\Binary\\_bin_xb\\buffytitle.xbx");
-    f = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE)
-        return NULL;
-    ReadFile(f, buf, sizeof buf, &got, NULL);
-    CloseHandle(f);
-    if (got < 0x2800 || memcmp(buf, "XPR0", 4) || ((buf[0x19]) != 0x0C))
+    if (!icon_pixels(game_dir, img))
         return NULL;
     memset(&bh, 0, sizeof bh);
     bh.bV5Size = sizeof bh;
@@ -270,20 +287,82 @@ static HICON load_game_icon(const WCHAR *game_dir)
     ReleaseDC(NULL, dc);
     if (!color)
         return NULL;
-    px = (uint32_t *)bits;
-    for (by = 0; by < 32; by++)
-        for (bx = 0; bx < 32; bx++) {
-            uint32_t blk[16];
-            dxt1_block(buf + 0x800 + (by * 32 + bx) * 8, blk);
-            for (i = 0; i < 16; i++)
-                px[(by * 4 + i / 4) * 128 + bx * 4 + i % 4] = blk[i];
-        }
+    memcpy(bits, img, sizeof img);
     mask = CreateBitmap(128, 128, 1, 1, NULL);
     ii.fIcon = TRUE; ii.xHotspot = ii.yHotspot = 0; ii.hbmMask = mask; ii.hbmColor = color;
     ic = CreateIconIndirect(&ii);
     DeleteObject(mask);
     DeleteObject(color);
     return ic;
+}
+
+/* The same image built into the game's exe as its icon (Explorer, shortcuts,
+ * the taskbar and the game's own window), at 128, 64, 48, 32 and 16 pixels.
+ * It comes from the player's disc, so it is added here rather than shipped. */
+static int exe_has_icon(const WCHAR *exe)
+{
+    HMODULE m = LoadLibraryExW(exe, NULL, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    int has;
+    if (!m)
+        return 1;                          /* can't tell: leave it alone */
+    has = FindResourceW(m, MAKEINTRESOURCEW(1), RT_GROUP_ICON) != NULL;
+    FreeLibrary(m);
+    return has;
+}
+
+static void embed_game_icon(const WCHAR *game_dir)
+{
+    static const int sizes[] = { 128, 64, 48, 32, 16 };
+    enum { N = 5 };
+    static uint32_t img[128 * 128];
+    static uint8_t data[N][40 + 128 * 128 * 4 + 128 * 16];
+    DWORD bytes[N];
+    uint8_t group[6 + N * 14];
+    WCHAR exe[MAX_PATH];
+    HANDLE u;
+    int k, ok = 1;
+
+    join(exe, game_dir, GAME_EXE);
+    if (!file_exists(exe) || exe_has_icon(exe) || !icon_pixels(game_dir, img))
+        return;
+    memset(group, 0, sizeof group);
+    group[2] = 1; group[4] = N;
+    for (k = 0; k < N; k++) {
+        int sz = sizes[k], x, y, mrow = ((sz + 31) / 32) * 4;
+        BITMAPINFOHEADER *bi = (BITMAPINFOHEADER *)data[k];
+        uint32_t *px = (uint32_t *)(data[k] + 40);
+        uint8_t *e = group + 6 + k * 14;
+        memset(data[k], 0, sizeof data[k]);
+        bi->biSize = 40; bi->biWidth = sz; bi->biHeight = sz * 2; bi->biPlanes = 1; bi->biBitCount = 32;
+        for (y = 0; y < sz; y++)
+            for (x = 0; x < sz; x++) {
+                /* box filter over the source pixels this one covers */
+                int x0 = x * 128 / sz, x1 = (x + 1) * 128 / sz, y0 = y * 128 / sz, y1 = (y + 1) * 128 / sz, sx, sy;
+                unsigned acc[4] = { 0, 0, 0, 0 }, n = 0;
+                for (sy = y0; sy < y1; sy++)
+                    for (sx = x0; sx < x1; sx++, n++) {
+                        uint32_t c = img[sy * 128 + sx];
+                        acc[0] += c & 0xFF; acc[1] += (c >> 8) & 0xFF; acc[2] += (c >> 16) & 0xFF; acc[3] += c >> 24;
+                    }
+                px[(sz - 1 - y) * sz + x] = (acc[3] / n) << 24 | (acc[2] / n) << 16 | (acc[1] / n) << 8 | acc[0] / n;
+            }
+        bytes[k] = 40 + sz * sz * 4 + mrow * sz;       /* the AND mask stays 0: alpha decides */
+        e[0] = (uint8_t)sz; e[1] = (uint8_t)sz;
+        e[4] = 1; e[6] = 32;
+        memcpy(e + 8, &bytes[k], 4);
+        e[12] = (uint8_t)(k + 1);
+    }
+    u = BeginUpdateResourceW(exe, FALSE);
+    if (!u)
+        return;
+    for (k = 0; k < N; k++)
+        ok &= UpdateResourceW(u, RT_ICON, MAKEINTRESOURCEW(k + 1), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+                              data[k], bytes[k]) != 0;
+    ok &= UpdateResourceW(u, RT_GROUP_ICON, MAKEINTRESOURCEW(1), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+                          group, sizeof group) != 0;
+    EndUpdateResourceW(u, !ok);
+    if (ok)
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, exe, NULL);   /* Explorer: the new icon */
 }
 
 /* ── the disc image: XDVDFS ────────────────────────────────────────────── */
@@ -845,6 +924,7 @@ static int install_run(InstallJob *job)
     post_progress(900, L"Setting up the PC version...");
     if (!copy_program(job->target))
         return 0;
+    embed_game_icon(job->target);
     write_mods_readme(job->target);
     if (job->movies && !convert_movies(job->target))
         return 0;
@@ -882,6 +962,11 @@ static void settings_load(void)
         if (k_res[i].w == w && k_res[i].h == h)
             sel = i;
     SendMessageW(ctl(ID_RESOLUTION), CB_SETCURSEL, (WPARAM)sel, 0);
+    {
+        WCHAR r[32];
+        GetPrivateProfileStringW(L"Display", L"Renderer", L"native", r, 32, p);
+        SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, _wcsicmp(r, L"emulated") ? 0 : 1, 0);
+    }
     CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN,
                      GetPrivateProfileIntW(L"Display", L"Fullscreen", 1, p) ? ID_FULLSCREEN : ID_WINDOWED);
     CheckDlgButton(s_wnd, ID_VSYNC, GetPrivateProfileIntW(L"Display", L"VSync", 1, p) ? BST_CHECKED : BST_UNCHECKED);
@@ -889,6 +974,8 @@ static void settings_load(void)
                    GetPrivateProfileIntW(L"Game", L"SkipIntroMovies", 0, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_WS_SAFE,
                    GetPrivateProfileIntW(L"Display", L"WidescreenWide", 0, p) ? BST_UNCHECKED : BST_CHECKED);
+    CheckDlgButton(s_wnd, ID_REPORT_BTN,
+                   GetPrivateProfileIntW(L"Debug", L"ReportButton", 1, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_INVERT_X,
                    GetPrivateProfileIntW(L"Controls", L"InvertCameraX", 0, p) ? BST_CHECKED : BST_UNCHECKED);
     s_settings_dirty = 0;
@@ -910,11 +997,14 @@ static int settings_save(void)
     WritePrivateProfileStringW(L"Display", L"Width", v, p);
     swprintf_s(v, 16, L"%d", k_res[sel].h);
     WritePrivateProfileStringW(L"Display", L"Height", v, p);
+    WritePrivateProfileStringW(L"Display", L"Renderer",
+                               SendMessageW(ctl(ID_RENDERER), CB_GETCURSEL, 0, 0) == 1 ? L"emulated" : L"native", p);
     WritePrivateProfileStringW(L"Display", L"VSync", IsDlgButtonChecked(s_wnd, ID_VSYNC) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"Fullscreen", IsDlgButtonChecked(s_wnd, ID_FULLSCREEN) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Game", L"SkipIntroMovies", IsDlgButtonChecked(s_wnd, ID_SKIP_INTRO) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"WidescreenWide", IsDlgButtonChecked(s_wnd, ID_WS_SAFE) ? L"0" : L"1", p);
     WritePrivateProfileStringW(L"Controls", L"InvertCameraX", IsDlgButtonChecked(s_wnd, ID_INVERT_X) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Debug", L"ReportButton", IsDlgButtonChecked(s_wnd, ID_REPORT_BTN) ? L"1" : L"0", p);
     s_settings_dirty = 0;
     set_text(ID_SETTINGS_STATUS, L"Settings saved.");
     return 1;
@@ -923,11 +1013,13 @@ static int settings_save(void)
 static void settings_defaults(void)
 {
     SendMessageW(ctl(ID_RESOLUTION), CB_SETCURSEL, 0, 0);
+    SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, 0, 0);
     CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN, ID_FULLSCREEN);
     CheckDlgButton(s_wnd, ID_VSYNC, BST_CHECKED);
     CheckDlgButton(s_wnd, ID_SKIP_INTRO, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_WS_SAFE, BST_CHECKED);
     CheckDlgButton(s_wnd, ID_INVERT_X, BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_REPORT_BTN, BST_CHECKED);
     s_settings_dirty = 1;
     set_text(ID_SETTINGS_STATUS, L"Defaults restored. Press Save or Play to keep them.");
 }
@@ -1189,6 +1281,7 @@ static void play(void)
         settings_save();
     if (s_nmods)
         mods_apply();
+    embed_game_icon(s_game_dir);           /* e.g. an exe copied in by hand */
     join(exe, s_game_dir, GAME_EXE);
     swprintf_s(cmd, MAX_PATH + 4, L"\"%s\"", exe);
     memset(&si, 0, sizeof si);
@@ -1457,11 +1550,12 @@ static void build_ui(void)
     add(TAB_PLAY, L"Static", L"While playing: Alt+Enter or F11 switches fullscreen. The game's own Options page "
                              L"also has Resolution and VSync, and the main menu has Exit.",
         SS_LEFT, X0, 356, 560, 40, 0);
+    add(TAB_PLAY, L"Button", L"Open bug reports", BS_PUSHBUTTON | WS_TABSTOP, X0 + 420, 434, 140, 30, ID_REPORTS_OPEN);
     swprintf_s(v, 64, L"Launcher version %s", LAUNCHER_VERSION);
     add(TAB_PLAY, L"Static", v, SS_LEFT, X0, 440, 300, 20, ID_VERSION);
 
     /* Settings */
-    add(TAB_SETTINGS, L"Button", L"Display", BS_GROUPBOX, X0, 50, 560, 206, 0);
+    add(TAB_SETTINGS, L"Button", L"Display", BS_GROUPBOX, X0, 50, 560, 236, 0);
     add(TAB_SETTINGS, L"Button", L"Windowed", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, X0 + 16, 76, 120, 24, ID_WINDOWED);
     add(TAB_SETTINGS, L"Button", L"Fullscreen", BS_AUTORADIOBUTTON, X0 + 150, 76, 120, 24, ID_FULLSCREEN);
     add(TAB_SETTINGS, L"Static", L"Borderless, covering the whole monitor.", SS_LEFT, X0 + 276, 80, 270, 20, 0);
@@ -1475,16 +1569,22 @@ static void build_ui(void)
         X0 + 16, 184, 420, 24, ID_VSYNC);
     add(TAB_SETTINGS, L"Button", L"Widescreen: keep the original side-to-side view (no pop-in or clipping at the edges)",
         BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, X0 + 16, 212, 530, 36, ID_WS_SAFE);
-    add(TAB_SETTINGS, L"Button", L"Game and controls", BS_GROUPBOX, X0, 264, 560, 92, 0);
+    add(TAB_SETTINGS, L"Static", L"Renderer", SS_LEFT, X0 + 16, 256, 120, 20, 0);
+    h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 150, 252, 300, 100, ID_RENDERER);
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Native Direct3D 11 (fastest)");
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Emulated Xbox GPU (fallback)");
+    add(TAB_SETTINGS, L"Button", L"Game and controls", BS_GROUPBOX, X0, 292, 560, 108, 0);
     add(TAB_SETTINGS, L"Button", L"Skip the intro movies at start-up", BS_AUTOCHECKBOX | WS_TABSTOP,
-        X0 + 16, 288, 420, 24, ID_SKIP_INTRO);
+        X0 + 16, 312, 420, 24, ID_SKIP_INTRO);
     add(TAB_SETTINGS, L"Button", L"Invert camera left / right (right stick)", BS_AUTOCHECKBOX | WS_TABSTOP,
-        X0 + 16, 318, 420, 24, ID_INVERT_X);
-    add(TAB_SETTINGS, L"Static", L"Volume, subtitles, vibration and the game's own camera inversion are kept in its save "
-                                 L"and are changed from Options in the game.", SS_LEFT, X0, 364, 560, 34, 0);
-    add(TAB_SETTINGS, L"Button", L"Restore defaults", BS_PUSHBUTTON | WS_TABSTOP, X0, 404, 140, 30, ID_DEFAULTS);
-    add(TAB_SETTINGS, L"Button", L"Save", BS_PUSHBUTTON | WS_TABSTOP, X0 + 452, 404, 108, 30, ID_SAVE);
-    add(TAB_SETTINGS, L"Static", L"", SS_LEFT, X0, 444, 560, 20, ID_SETTINGS_STATUS);
+        X0 + 16, 340, 420, 24, ID_INVERT_X);
+    add(TAB_SETTINGS, L"Button", L"Bug report button: click the left stick (or press F12) to save what is on screen",
+        BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 16, 368, 530, 24, ID_REPORT_BTN);
+    add(TAB_SETTINGS, L"Static", L"Volume, subtitles and vibration are set from Options in the game.",
+        SS_LEFT, X0, 404, 560, 18, 0);
+    add(TAB_SETTINGS, L"Button", L"Restore defaults", BS_PUSHBUTTON | WS_TABSTOP, X0, 424, 140, 30, ID_DEFAULTS);
+    add(TAB_SETTINGS, L"Button", L"Save", BS_PUSHBUTTON | WS_TABSTOP, X0 + 452, 424, 108, 30, ID_SAVE);
+    add(TAB_SETTINGS, L"Static", L"", SS_LEFT, X0 + 150, 430, 290, 20, ID_SETTINGS_STATUS);
 
     /* Mods */
     lv = add(TAB_MODS, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
@@ -1653,11 +1753,12 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             }
             break;
         }
-        case ID_RESOLUTION:
+        case ID_RESOLUTION: case ID_RENDERER:
             if (HIWORD(wp) == CBN_SELCHANGE)
                 s_settings_dirty = 1, set_text(ID_SETTINGS_STATUS, L"");
             break;
         case ID_WINDOWED: case ID_FULLSCREEN: case ID_VSYNC: case ID_SKIP_INTRO: case ID_WS_SAFE: case ID_INVERT_X:
+        case ID_REPORT_BTN:
             s_settings_dirty = 1;
             set_text(ID_SETTINGS_STATUS, L"");
             break;
@@ -1671,6 +1772,16 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             tex_save();
             break;
         case ID_TEX_OPEN_LOAD: tex_open(L"load"); break;
+        case ID_REPORTS_OPEN: {
+            /* bug reports the game saved (left stick / F12) */
+            WCHAR d[MAX_PATH];
+            if (!is_game_folder(s_game_dir))
+                break;
+            join(d, s_game_dir, L"bug_reports");
+            mkdirs(d);
+            ShellExecuteW(w, L"open", d, NULL, NULL, SW_SHOWNORMAL);
+            break;
+        }
         case ID_TEX_OPEN_DUMP: tex_open(L"dump"); break;
         case ID_TEX_REFRESH: tex_refresh(); break;
         case ID_MOD_UP: mods_move(-1); break;
@@ -1897,6 +2008,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     join(s_launcher_ini, s_launcher_dir, L"launcher.ini");
     load_launcher_ini();
 
+    /* --icon <folder>: give that folder's game exe its icon (tests). */
+    if (argc >= 3 && !wcscmp(argv[1], L"--icon")) {
+        WCHAR exe[MAX_PATH];
+        embed_game_icon(argv[2]);
+        join(exe, argv[2], GAME_EXE);
+        return exe_has_icon(exe) ? 0 : 1;
+    }
     /* --install <image> <folder>: install without a window (tests). */
     if (argc >= 4 && !wcscmp(argv[1], L"--install")) {
         wcscpy_s(s_job.image, MAX_PATH, argv[2]);
