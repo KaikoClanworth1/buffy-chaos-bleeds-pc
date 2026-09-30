@@ -1,0 +1,12 @@
+[submodule "xboxrecomp/third_party/glslang"]
+	path = xboxrecomp/third_party/glslang
+	url = https://github.com/KhronosGroup/glslang
+[submodule "xboxrecomp/third_party/Vulkan-Headers"]
+	path = xboxrecomp/third_party/Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers
+[submodule "xboxrecomp/third_party/volk"]
+	path = xboxrecomp/third_party/volk
+	url = https://github.com/zeux/volk
+[submodule "xboxrecomp/third_party/VulkanMemoryAllocator"]
+	path = xboxrecomp/third_party/VulkanMemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator

@@ -41,7 +41,7 @@ typedef struct {
 
 typedef struct {
     PsKey key;
-    ID3D11PixelShader *ps;
+    GpuShader *ps;
 } PsEntry;
 
 #define PS_CACHE 256
@@ -358,13 +358,12 @@ static void psh_key(PsKey *k, uint32_t bound, uint32_t cube)
     k->tex_cube = cube;
 }
 
-static ID3D11PixelShader *psh_get(uint32_t bound, uint32_t cube)
+static GpuShader *psh_get(uint32_t bound, uint32_t cube)
 {
     PsKey k;
     int i;
     static char src[32768];
-    ID3DBlob *blob = NULL, *err = NULL;
-    ID3D11PixelShader *ps = NULL;
+    GpuShader *ps = NULL;
 
     static int last;
     psh_key(&k, bound, cube);
@@ -380,22 +379,11 @@ static ID3D11PixelShader *psh_get(uint32_t bound, uint32_t cube)
         return NULL;
     }
     { LARGE_INTEGER a, b, f; QueryPerformanceCounter(&a);
-    if (FAILED(gpu_compile(src, "ps", "ps_4_0", &blob))) { blob = NULL; }
+    ps = gpu_shader_create(GPU_PS, src, "ps");         /* (a failure is logged there) */
     QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
     if (getenv("RECOMP_PB_PROFILE"))
         fprintf(stderr, "  [HITCH] pixel shader #%d compiled in %.1f ms\n", s_ps_count,
                 (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart); }
-    if (!blob) {
-        static int shown;
-        if (shown++ < 3)
-            fprintf(stderr, "  [GPU11] combiner shader failed: %s\n%s\n",
-                    err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "?", src);
-        if (err) ID3D10Blob_Release(err);
-    } else {
-        ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(blob),
-                                       ID3D10Blob_GetBufferSize(blob), NULL, &ps);
-        ID3D10Blob_Release(blob);
-    }
     if (getenv("RECOMP_PSH_DUMP")) {
         static int dumped;
         if (dumped++ < 40)
@@ -565,16 +553,16 @@ static D3D11_TEXTURE_ADDRESS_MODE tx_addr(uint32_t m)
     }
 }
 
-static ID3D11SamplerState *tx_sampler(int st, int has_mips)
+static GpuSampler *tx_sampler(int st, int has_mips)
 {
-    static ID3D11SamplerState *cache[64];
+    static GpuSampler *cache[64];
     static uint32_t key[64][3];
     static int count;
     uint32_t addr = tex_reg(st, 0x1B08) & 0x000F0F0Fu;
     uint32_t filt = tex_reg(st, 0x1B14) & 0x0FFF0000u;
     uint32_t border = tex_reg(st, 0x1B24);
     uint32_t minf = (filt >> 16) & 0xFF, magf = (filt >> 24) & 0xF;
-    D3D11_SAMPLER_DESC d;
+    GpuSamplerDesc d;
     int i, lin_min, lin_mag, lin_mip, use_mip;
 
     if (!has_mips) filt |= 0x80000000u;
@@ -592,21 +580,22 @@ static ID3D11SamplerState *tx_sampler(int st, int has_mips)
         use_mip = lin_mip = 1;
     }
     memset(&d, 0, sizeof d);
-    d.Filter = (D3D11_FILTER)((lin_min ? 0x10 : 0) | (lin_mag ? 0x04 : 0) | (lin_mip ? 0x01 : 0));
-    d.AddressU = tx_addr(addr);
-    d.AddressV = tx_addr(addr >> 8);
-    d.AddressW = tx_addr(addr >> 16);
-    d.BorderColor[0] = ((border >> 16) & 0xFF) / 255.0f;
-    d.BorderColor[1] = ((border >> 8) & 0xFF) / 255.0f;
-    d.BorderColor[2] = (border & 0xFF) / 255.0f;
-    d.BorderColor[3] = (border >> 24) / 255.0f;
-    d.MaxLOD = use_mip ? D3D11_FLOAT32_MAX : 0.0f;
-    d.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    d.min_linear = lin_min;
+    d.mag_linear = lin_mag;
+    d.mip_linear = lin_mip;
+    d.u = (GpuAddress)tx_addr(addr);
+    d.v = (GpuAddress)tx_addr(addr >> 8);
+    d.w = (GpuAddress)tx_addr(addr >> 16);
+    d.border[0] = ((border >> 16) & 0xFF) / 255.0f;
+    d.border[1] = ((border >> 8) & 0xFF) / 255.0f;
+    d.border[2] = (border & 0xFF) / 255.0f;
+    d.border[3] = (border >> 24) / 255.0f;
+    d.max_lod = use_mip ? 1000.0f : 0.0f;
     if (count == 64) {
-        ID3D11SamplerState_Release(cache[63]);
+        gpu_sampler_release(cache[63]);            /* (a draw recorded for interpolation keeps its own reference) */
         count = 63;
     }
-    ID3D11Device_CreateSamplerState(s_dev, &d, &cache[count]);
+    cache[count] = gpu_sampler_create(&d);
     key[count][0] = addr; key[count][1] = filt; key[count][2] = border;
     return cache[count++];
 }

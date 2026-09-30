@@ -36,8 +36,12 @@ Start with "Buffy Launcher.exe":
             are fine). textures_replacement\README.txt explains more.
 
 The game itself is buffy_chaos_bleeds.exe; keep the installed folder together
-(the exe reads default.xbe and the Buffy\ data folder beside it). Saves go to
-SaveData\.
+(the exe reads default.xbe and the Buffy\ data folder beside it). Each save is
+one file in SaveData\ (BUFFY A.sav and so on): copy them to back them up or to
+move them to another PC. Saves from versions before 0.4 (the Xbox layout in
+UDATA\) are converted the first time the game or the launcher's Saves tab
+runs; the originals are kept in SaveBackups\. XboxData\ holds the emulated
+console's own files and can be left alone.
 
 Controls (keyboard, while the game window is focused):
   Enter = Start      Space = A        Backspace = B      E = X     Q = Y
@@ -48,8 +52,9 @@ the first is player 1 (together with the keyboard), the next player 2, and
 so on, for multiplayer. Rumble goes to each player's own pad (set BUFFY_NO_RUMBLE=1 to turn rumble off). LB/RB are the Xbox's
 Black/White buttons.
 
-Renderer: the native Direct3D 11 renderer draws the game's own Direct3D
-calls and is the default. The emulated renderer (it emulates the Xbox GPU
+Renderer: the native renderer draws the game's own Direct3D calls, through
+Vulkan (the default; Direct3D 11 where Vulkan 1.3 is missing) or Direct3D 11
+(Renderer=d3d11). The emulated renderer (it emulates the Xbox GPU
 from its command stream) is still there as a fallback: set Renderer to
 "Emulated" in the launcher's Settings, or [Display] Renderer=emulated in
 buffy_settings.ini, or BUFFY_RENDERER=emulated.

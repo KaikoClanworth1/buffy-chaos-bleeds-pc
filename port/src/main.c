@@ -86,7 +86,8 @@ extern ptrdiff_t g_xbox_mem_offset;
 
 /* The game dir is the D:\ root: it holds default.xbe and Buffy\Binary\...
  * Defaults to the folder the .exe lives in; BUFFY_GAME_DIR overrides it.
- * Saves (T:, U:, Z:) go to SaveData beside the .exe. */
+ * The saves are plain files in SaveData beside the .exe (buffy_saves.c); the
+ * emulated console's own files (T:, Z:, the hard disk) go to XboxData. */
 static char g_game_dir[MAX_PATH];
 static char g_xbe_path[MAX_PATH];
 static char g_save_dir[MAX_PATH];
@@ -103,7 +104,11 @@ static void resolve_game_paths(void)
 
     strcpy_s(g_game_dir, MAX_PATH, (env && *env) ? env : exe_dir);
     sprintf_s(g_xbe_path, MAX_PATH, "%s\\default.xbe", g_game_dir);
-    sprintf_s(g_save_dir, MAX_PATH, "%s\\SaveData", exe_dir);
+    sprintf_s(g_save_dir, MAX_PATH, "%s\\XboxData", exe_dir);
+    {
+        void buffy_saves_init(const char *exe_dir, const char *game_dir);
+        buffy_saves_init(exe_dir, g_game_dir);   /* (converts an older version's saves) */
+    }
 }
 
 #define YOUR_GAME_XBE_PATH      g_xbe_path
@@ -505,20 +510,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     {
         const char *buffy_platform_text(void);
         fprintf(stderr, "[PLATFORM] %s\n", buffy_platform_text());
+        fprintf(stderr, "  [THREAD] %lu: game\n", GetCurrentThreadId());
     }
     resolve_game_paths();
 
-    /* Title defaults, overridable from the environment:
-     *  - the emulated APU must be up, or DirectSound's objects are never
-     *    constructed and XApp::InitInstance dies in CommitDeferredSettings;
-     *  - after DownloadEffectsImage the GP DSP is sent command 3 through the
-     *    mailbox at GP scratch + 0x810 and DirectSound spins until the DSP
-     *    clears it. The DSP is not emulated, so the runtime clears it. The
-     *    scratch block's address is fixed by the contiguous allocation order. */
-    if (!getenv("RECOMP_AC97_READY"))
-        _putenv("RECOMP_AC97_READY=1");
-    if (!getenv("RECOMP_APU_DSP_ACK"))
-        _putenv("RECOMP_APU_DSP_ACK=0x82C58810");
+    /* Audio: no emulated sound chip. DirectSound is replaced whole
+     * (buffy_dsound.c: DirectSoundCreate, CommitDeferredSettings,
+     * DownloadEffectsImage and every buffer call), so nothing reaches the
+     * MCPX APU, the AC'97 codec or the DSP mailbox; the emulated APU and its
+     * register traps (RECOMP_AC97_READY, RECOMP_APU_DSP_ACK) stay off. */
     /* GPU: consume the pushbuffer on its own FIFO thread (fences, semaphores,
      * software methods) and deliver a 60 Hz vblank; D3D's Swap depends on both. */
     if (!getenv("RECOMP_PB_EXEC"))

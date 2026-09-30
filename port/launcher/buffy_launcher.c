@@ -42,6 +42,7 @@
 #include <wchar.h>
 
 #include "unzip.h"
+#include "../src/buffy_savefmt.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -1041,8 +1042,9 @@ static void settings_load(void)
     SendMessageW(ctl(ID_RESOLUTION), CB_SETCURSEL, (WPARAM)sel, 0);
     {
         WCHAR r[32];
-        GetPrivateProfileStringW(L"Display", L"Renderer", L"native", r, 32, p);
-        SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, _wcsicmp(r, L"emulated") ? 0 : 1, 0);
+        GetPrivateProfileStringW(L"Display", L"Renderer", L"vulkan", r, 32, p);
+        /* ("native", before 0.4: the default, now Vulkan) */
+        SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, !_wcsicmp(r, L"d3d11") ? 1 : !_wcsicmp(r, L"emulated") ? 2 : 0, 0);
     }
     CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN,
                      GetPrivateProfileIntW(L"Display", L"Fullscreen", 1, p) ? ID_FULLSCREEN : ID_WINDOWED);
@@ -1079,8 +1081,10 @@ static int settings_save(void)
     WritePrivateProfileStringW(L"Display", L"Width", v, p);
     swprintf_s(v, 16, L"%d", k_res[sel].h);
     WritePrivateProfileStringW(L"Display", L"Height", v, p);
-    WritePrivateProfileStringW(L"Display", L"Renderer",
-                               SendMessageW(ctl(ID_RENDERER), CB_GETCURSEL, 0, 0) == 1 ? L"emulated" : L"native", p);
+    {
+        LRESULT r = SendMessageW(ctl(ID_RENDERER), CB_GETCURSEL, 0, 0);
+        WritePrivateProfileStringW(L"Display", L"Renderer", r == 1 ? L"d3d11" : r == 2 ? L"emulated" : L"vulkan", p);
+    }
     WritePrivateProfileStringW(L"Display", L"VSync", IsDlgButtonChecked(s_wnd, ID_VSYNC) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"FpsLimit",
                                SendMessageW(ctl(ID_FPS_LIMIT), CB_GETCURSEL, 0, 0) == 1 ? L"30" : L"60", p);
@@ -1785,11 +1789,12 @@ static int ctl_capture_msg(const MSG *msg)
 
 /* ── Saves ─────────────────────────────────────────────────────────────────
  *
- * The game's saves are ordinary files: UDATA\56550005\<save id>\<name> (1 KB)
- * with SaveMeta.xbx (UTF-16 "Name=BUFFY A") beside it; TDATA\56550005 holds
- * the title's own data. This page lists them and copies them to and from
- * dated folders in SaveBackups (a restore first backs the current ones up). */
-#define SAVE_TITLE L"56550005"
+ * Each save is one plain file, SaveData\<name>.sav in the game folder
+ * (src/buffy_savefmt.c). Versions before 0.4 kept them the Xbox way
+ * (UDATA\56550005\<id>\ with SaveMeta.xbx): this page converts those as the
+ * game does, lists the saves and copies them to and from dated folders in
+ * SaveBackups (a restore first backs the current ones up; an old backup with
+ * UDATA in it is converted as it is restored). */
 
 static void sav_path(WCHAR *out, const WCHAR *sub)
 {
@@ -1815,52 +1820,74 @@ static int sav_shell(UINT func, const WCHAR *from, const WCHAR *to)
     return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
 }
 
+static int sav_game_running(void)
+{
+    if (s_game_proc && WaitForSingleObject(s_game_proc, 0) == WAIT_TIMEOUT) {
+        set_text(ID_SAV_STATUS, L"The game is running: close it first.");
+        return 1;
+    }
+    return 0;
+}
+
+/* Copies every *.sav of folder `from` into `to`; the number copied, -1 on a
+ * failure. */
+static int sav_copy_saves(const WCHAR *from, const WCHAR *to)
+{
+    WCHAR pat[MAX_PATH], a[MAX_PATH], b[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int n = 0;
+    swprintf_s(pat, MAX_PATH, L"%s\\*.sav", from);
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    CreateDirectoryW(to, NULL);
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        swprintf_s(a, MAX_PATH, L"%s\\%s", from, fd.cFileName);
+        swprintf_s(b, MAX_PATH, L"%s\\%s", to, fd.cFileName);
+        if (!CopyFileW(a, b, FALSE)) {
+            n = -1;
+            break;
+        }
+        n++;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+
 static void sav_refresh(void)
 {
     HWND lv = ctl(ID_SAV_LIST);
-    WCHAR root[MAX_PATH], pat[MAX_PATH], v[128];
+    WCHAR dir[MAX_PATH], pat[MAX_PATH], v[160];
     WIN32_FIND_DATAW fd;
     HANDLE f;
-    int n = 0;
+    int n = 0, conv = 0;
     ListView_DeleteAllItems(lv);
     if (!is_game_folder(s_game_dir)) {
         set_text(ID_SAV_STATUS, L"Install the game first (Install tab).");
         return;
     }
-    swprintf_s(root, MAX_PATH, L"%s\\UDATA\\" SAVE_TITLE, s_game_dir);
-    swprintf_s(pat, MAX_PATH, L"%s\\*", root);
+    /* saves from before 0.4, in the Xbox layout: converted (the originals
+     * kept in SaveBackups) -- not while the game has them open */
+    if (!(s_game_proc && WaitForSingleObject(s_game_proc, 0) == WAIT_TIMEOUT))
+        conv = savefmt_migrate(s_game_dir, s_game_dir, 1);
+    sav_path(dir, L"SaveData");
+    swprintf_s(pat, MAX_PATH, L"%s\\*.sav", dir);
     f = FindFirstFileW(pat, &fd);
     if (f != INVALID_HANDLE_VALUE) {
         do {
-            WCHAR meta[MAX_PATH], name[64] = L"", when[64] = L"";
-            FILE *m;
+            WCHAR name[128], when[64] = L"";
+            SYSTEMTIME st, lt;
             LVITEMW it;
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.')
+            size_t l = wcslen(fd.cFileName);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || l <= 4 || l - 4 >= 128)
                 continue;
-            swprintf_s(meta, MAX_PATH, L"%s\\%s\\SaveMeta.xbx", root, fd.cFileName);
-            if (!_wfopen_s(&m, meta, L"rb") && m) {
-                WCHAR buf[128] = L"", *p;
-                size_t got = fread(buf, 2, 127, m);
-                fclose(m);
-                buf[got] = 0;
-                if ((p = wcsstr(buf, L"Name=")) != NULL) {
-                    wcsncpy_s(name, 64, p + 5, _TRUNCATE);
-                    if ((p = wcspbrk(name, L"\r\n")) != NULL)
-                        *p = 0;
-                }
-            }
-            if (!name[0])
-                continue;
-            {
-                /* last played: the save file's time */
-                WCHAR sf[MAX_PATH];
-                WIN32_FILE_ATTRIBUTE_DATA a;
-                SYSTEMTIME st, lt;
-                swprintf_s(sf, MAX_PATH, L"%s\\%s\\%s", root, fd.cFileName, name);
-                if (GetFileAttributesExW(sf, GetFileExInfoStandard, &a) && FileTimeToSystemTime(&a.ftLastWriteTime, &st)
-                        && SystemTimeToTzSpecificLocalTime(NULL, &st, &lt))
-                    swprintf_s(when, 64, L"%04u-%02u-%02u %02u:%02u", lt.wYear, lt.wMonth, lt.wDay, lt.wHour, lt.wMinute);
-            }
+            wcsncpy_s(name, 128, fd.cFileName, l - 4);
+            /* last played: the save file's time */
+            if (FileTimeToSystemTime(&fd.ftLastWriteTime, &st) && SystemTimeToTzSpecificLocalTime(NULL, &st, &lt))
+                swprintf_s(when, 64, L"%04u-%02u-%02u %02u:%02u", lt.wYear, lt.wMonth, lt.wDay, lt.wHour, lt.wMinute);
             memset(&it, 0, sizeof it);
             it.mask = LVIF_TEXT;
             it.iItem = n;
@@ -1872,38 +1899,29 @@ static void sav_refresh(void)
         } while (FindNextFileW(f, &fd));
         FindClose(f);
     }
-    swprintf_s(v, 128, n ? L"%d saves. Backups go to SaveBackups in the game folder." : L"No saves yet.", n);
+    if (conv > 0)
+        swprintf_s(v, 160, L"%d save(s) converted from the old Xbox format; the originals are in SaveBackups.", conv);
+    else if (conv < 0)
+        wcscpy_s(v, 160, L"Some old saves could not be converted; they were left where they were (UDATA).");
+    else
+        swprintf_s(v, 160, n ? L"%d saves, in SaveData. Backups go to SaveBackups in the game folder." : L"No saves yet.", n);
     set_text(ID_SAV_STATUS, v);
 }
 
-/* Back up UDATA and TDATA into SaveBackups\<date><suffix>; the folder name in `made`. */
+/* Back up SaveData's saves into SaveBackups\<date><suffix>; the folder name
+ * in `made`. */
 static int sav_backup_to(const WCHAR *suffix, WCHAR *made)
 {
     WCHAR dst[MAX_PATH], src[MAX_PATH];
     SYSTEMTIME t;
-    int ok = 1;
     GetLocalTime(&t);
     sav_path(dst, L"SaveBackups");
     CreateDirectoryW(dst, NULL);
     swprintf_s(made, MAX_PATH, L"%04u-%02u-%02u %02u.%02u.%02u%s", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, suffix);
     swprintf_s(dst, MAX_PATH, L"%s\\SaveBackups\\%s", s_game_dir, made);
     CreateDirectoryW(dst, NULL);
-    sav_path(src, L"UDATA");
-    if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
-        ok &= sav_shell(FO_COPY, src, dst);
-    sav_path(src, L"TDATA");
-    if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
-        ok &= sav_shell(FO_COPY, src, dst);
-    return ok;
-}
-
-static int sav_game_running(void)
-{
-    if (s_game_proc && WaitForSingleObject(s_game_proc, 0) == WAIT_TIMEOUT) {
-        set_text(ID_SAV_STATUS, L"The game is running: close it first.");
-        return 1;
-    }
-    return 0;
+    sav_path(src, L"SaveData");
+    return sav_copy_saves(src, dst) >= 0;
 }
 
 static void sav_backup(void)
@@ -1951,13 +1969,22 @@ static void sav_restore(void)
     sav_restore_from(pick, 1);
 }
 
-/* Restore the backup in folder `pick` (ask = 1: confirm first). */
+/* Restore the backup in folder `pick` (ask = 1: confirm first): its .sav
+ * files, or an old backup's UDATA converted. */
 static void sav_restore_from(const WCHAR *pick, int ask)
 {
-    WCHAR made[MAX_PATH], src[MAX_PATH], dst[MAX_PATH], m[MAX_PATH + 96];
-    swprintf_s(src, MAX_PATH, L"%s\\UDATA", pick);
-    if (GetFileAttributesW(src) == INVALID_FILE_ATTRIBUTES) {
-        set_text(ID_SAV_STATUS, L"That folder is not a save backup (no UDATA in it).");
+    WCHAR made[MAX_PATH], old[MAX_PATH], dst[MAX_PATH], pat[MAX_PATH], m[MAX_PATH + 96];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int has_sav, n;
+    swprintf_s(pat, MAX_PATH, L"%s\\*.sav", pick);
+    h = FindFirstFileW(pat, &fd);
+    has_sav = h != INVALID_HANDLE_VALUE;
+    if (has_sav)
+        FindClose(h);
+    swprintf_s(old, MAX_PATH, L"%s\\UDATA\\56550005", pick);
+    if (!has_sav && GetFileAttributesW(old) == INVALID_FILE_ATTRIBUTES) {
+        set_text(ID_SAV_STATUS, L"That folder is not a save backup (no .sav files or UDATA in it).");
         return;
     }
     if (ask && MessageBoxW(s_wnd, L"Replace the current saves with this backup?\n\nThe current saves are backed up first.",
@@ -1967,24 +1994,27 @@ static void sav_restore_from(const WCHAR *pick, int ask)
         set_text(ID_SAV_STATUS, L"Could not back up the current saves first: nothing was changed.");
         return;
     }
-    sav_path(dst, L"UDATA");
-    sav_shell(FO_DELETE, dst, NULL);
-    sav_path(dst, L"");
-    dst[wcslen(dst) - 1] = 0;                            /* (the game folder, no trailing slash) */
-    if (!sav_shell(FO_COPY, src, dst)) {
+    /* the current saves (backed up above) make way */
+    sav_path(dst, L"SaveData");
+    swprintf_s(pat, MAX_PATH, L"%s\\*.sav", dst);
+    h = FindFirstFileW(pat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            WCHAR p[MAX_PATH];
+            swprintf_s(p, MAX_PATH, L"%s\\%s", dst, fd.cFileName);
+            DeleteFileW(p);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    n = has_sav ? sav_copy_saves(pick, dst) : savefmt_convert_xbox(old, dst, 1);
+    if (n < 0) {
         swprintf_s(m, MAX_PATH + 96, L"The restore failed; your saves are in SaveBackups\\%s.", made);
         set_text(ID_SAV_STATUS, m);
         return;
     }
-    swprintf_s(src, MAX_PATH, L"%s\\TDATA", pick);
-    if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES) {
-        WCHAR t2[MAX_PATH];
-        sav_path(t2, L"TDATA");
-        sav_shell(FO_DELETE, t2, NULL);
-        sav_shell(FO_COPY, src, dst);
-    }
     sav_refresh();
-    swprintf_s(m, MAX_PATH + 96, L"Restored. The saves from before are in SaveBackups\\%s.", made);
+    swprintf_s(m, MAX_PATH + 96, L"Restored%s. The saves from before are in SaveBackups\\%s.",
+               has_sav ? L"" : L" (converted from the old Xbox format)", made);
     set_text(ID_SAV_STATUS, m);
 }
 
@@ -2255,7 +2285,8 @@ static void build_ui(void)
         BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, X0 + 16, 212, 530, 36, ID_WS_SAFE);
     add(TAB_SETTINGS, L"Static", L"Renderer", SS_LEFT, X0 + 16, 256, 120, 20, 0);
     h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 150, 252, 300, 100, ID_RENDERER);
-    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Native Direct3D 11 (fastest)");
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Vulkan (recommended)");
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Direct3D 11");
     SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Emulated Xbox GPU (fallback)");
     add(TAB_SETTINGS, L"Button", L"Performance", BS_GROUPBOX, X0, 292, 560, 110, 0);
     add(TAB_SETTINGS, L"Static", L"FPS limit", SS_LEFT, X0 + 16, 316, 120, 20, 0);
@@ -2350,7 +2381,7 @@ static void build_ui(void)
     add(TAB_CONTROLS, L"Button", L"Save", BS_PUSHBUTTON | WS_TABSTOP, X0 + 452, 444, 108, 30, ID_CTL_SAVE);
 
     /* Saves */
-    add(TAB_SAVES, L"Static", L"Your saves are ordinary files in the game folder. Back them up, restore a backup, "
+    add(TAB_SAVES, L"Static", L"Each save is one file in the game folder's SaveData. Back them up, restore a backup, "
                               L"or open the folder to copy them yourself.", SS_LEFT, X0, 50, 560, 36, 0);
     lv = add(TAB_SAVES, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
              X0, 92, 560, 220, ID_SAV_LIST);
@@ -2360,7 +2391,7 @@ static void build_ui(void)
     col.mask = LVCF_TEXT | LVCF_WIDTH;
     col.pszText = L"Save"; col.cx = S(200); ListView_InsertColumn(lv, 0, &col);
     col.pszText = L"Last played"; col.cx = S(160); ListView_InsertColumn(lv, 1, &col);
-    col.pszText = L"Folder"; col.cx = S(180); ListView_InsertColumn(lv, 2, &col);
+    col.pszText = L"File"; col.cx = S(180); ListView_InsertColumn(lv, 2, &col);
     add(TAB_SAVES, L"Static", L"", SS_LEFT, X0, 322, 560, 40, ID_SAV_STATUS);
     add(TAB_SAVES, L"Button", L"Back up saves", BS_PUSHBUTTON | WS_TABSTOP, X0, 372, 140, 30, ID_SAV_BACKUP);
     add(TAB_SAVES, L"Button", L"Restore a backup...", BS_PUSHBUTTON | WS_TABSTOP, X0 + 150, 372, 150, 30, ID_SAV_RESTORE);
@@ -2600,7 +2631,7 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             WCHAR d[MAX_PATH];
             if (!is_game_folder(s_game_dir))
                 break;
-            swprintf_s(d, MAX_PATH, LOWORD(wp) == ID_SAV_OPEN ? L"%s\\UDATA\\" SAVE_TITLE : L"%s\\SaveBackups", s_game_dir);
+            swprintf_s(d, MAX_PATH, LOWORD(wp) == ID_SAV_OPEN ? L"%s\\SaveData" : L"%s\\SaveBackups", s_game_dir);
             CreateDirectoryW(d, NULL);
             ShellExecuteW(s_wnd, L"open", d, NULL, NULL, SW_SHOWNORMAL);
             break;
@@ -2994,7 +3025,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
                 sav_backup();
             if (GetEnvironmentVariableW(L"BUFFY_LAUNCHER_TEST_RESTORE", v, MAX_PATH))
                 sav_restore_from(v, 0);
-            if (capture_tab == TAB_SAVES) {
+            if (GetEnvironmentVariableW(L"BUFFY_LAUNCHER_TEST_DEFAULTS", v, MAX_PATH)) {
+                /* (tests) the Settings page at its defaults, nothing saved */
+                settings_defaults();
+                set_text(ID_SETTINGS_STATUS, L"");
+            }
+            if (capture_tab == TAB_SAVES || GetEnvironmentVariableW(L"BUFFY_LAUNCHER_TEST_DEFAULTS", v, MAX_PATH)) {
                 t0 = GetTickCount();
                 while (GetTickCount() - t0 < 200)
                     while (PeekMessageW(&pm, NULL, 0, 0, PM_REMOVE)) {

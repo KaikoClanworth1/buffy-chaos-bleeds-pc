@@ -40,6 +40,26 @@ static void pace_60hz(void)
         QueryPerformanceFrequency(&freq);
         timeBeginPeriod(1);
     }
+    {
+        /* (testing) BUFFY_FPS_LOG=1: frames per second, every 5 s */
+        static int log = -1;
+        static LARGE_INTEGER t0;
+        static int frames;
+        if (log < 0)
+            log = getenv("BUFFY_FPS_LOG") != NULL;
+        if (log) {
+            LARGE_INTEGER t;
+            QueryPerformanceCounter(&t);
+            if (!t0.QuadPart)
+                t0 = t;
+            frames++;
+            if (t.QuadPart - t0.QuadPart >= freq.QuadPart * 5) {
+                fprintf(stderr, "[FPS] %.1f\n", frames * (double)freq.QuadPart / (double)(t.QuadPart - t0.QuadPart));
+                frames = 0;
+                t0 = t;
+            }
+        }
+    }
     if (!on)
         return;
     {
@@ -127,6 +147,11 @@ void D3DDevice_Swap_0013A070(void)
     buffy_mods_frame();
     pace_60hz();
     D3DDevice_Swap_0013A070_orig();
+    {
+        /* the next frame's work starts now (frame interpolation, buffy_native.c) */
+        extern LARGE_INTEGER g_frame_begin;
+        QueryPerformanceCounter(&g_frame_begin);
+    }
 }
 
 /* ── stall sampler (BUFFY_STALLS=1) ─────────────────────────────────────

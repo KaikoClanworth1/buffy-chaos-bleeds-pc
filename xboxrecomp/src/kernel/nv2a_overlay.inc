@@ -50,10 +50,9 @@ static int      s_ov_frames;
 static LARGE_INTEGER s_ov_fps_t0;
 static DWORD    s_ov_drawn_at;              /* when the panel's picture was last made */
 
-static ID3D11Texture2D          *s_ov_tex;
-static ID3D11ShaderResourceView *s_ov_srv;
-static ID3D11PixelShader        *s_ov_ps;
-static ID3D11BlendState         *s_ov_bs;
+static GpuTexture    *s_ov_tex;
+static GpuShader     *s_ov_ps;
+static GpuBlendState *s_ov_bs;
 static int      s_ov_tw, s_ov_th;           /* the texture's size */
 static HDC      s_ov_dc;
 static HBITMAP  s_ov_bmp;
@@ -92,20 +91,8 @@ static void gpu_overlay_tick(void)
 
 static void ov_gpu_name(void)
 {
-    IDXGIDevice *xd = NULL;
-    IDXGIAdapter *ad = NULL;
-    DXGI_ADAPTER_DESC desc;
-    if (s_ov_gpu[0])
-        return;
-    strcpy_s(s_ov_gpu, sizeof s_ov_gpu, "?");
-    if (SUCCEEDED(ID3D11Device_QueryInterface(s_dev, &IID_IDXGIDevice, (void **)&xd))) {
-        if (SUCCEEDED(IDXGIDevice_GetAdapter(xd, &ad))) {
-            if (SUCCEEDED(IDXGIAdapter_GetDesc(ad, &desc)))
-                WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, s_ov_gpu, sizeof s_ov_gpu, NULL, NULL);
-            IDXGIAdapter_Release(ad);
-        }
-        IDXGIDevice_Release(xd);
-    }
+    if (!s_ov_gpu[0])
+        strcpy_s(s_ov_gpu, sizeof s_ov_gpu, gpu_adapter_name()[0] ? gpu_adapter_name() : "?");
 }
 
 static int ov_init(void)
@@ -114,24 +101,21 @@ static int ov_init(void)
         "Texture2D t0 : register(t0); SamplerState s0 : register(s0);\n"
         "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
         "float4 ps(V i) : SV_Target { return t0.Sample(s0, i.uv); }\n";
-    ID3DBlob *b = NULL;
-    D3D11_BLEND_DESC bd;
+    GpuBlendDesc bd;
     if (s_ov_ps)
         return 1;
-    if (!s_blit_vs || FAILED(gpu_compile(src, "ps", "ps_4_0", &b)))
+    if (!s_blit_vs || !(s_ov_ps = gpu_shader_create(GPU_PS, src, "ps")))
         return 0;
-    ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(b), ID3D10Blob_GetBufferSize(b), NULL, &s_ov_ps);
-    ID3D10Blob_Release(b);
     memset(&bd, 0, sizeof bd);
-    bd.RenderTarget[0].BlendEnable = TRUE;
-    bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;              /* premultiplied */
-    bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-    bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    ID3D11Device_CreateBlendState(s_dev, &bd, &s_ov_bs);
+    bd.enable = 1;
+    bd.src = GPU_BLEND_ONE;                                     /* premultiplied */
+    bd.dst = GPU_BLEND_INV_SRC_ALPHA;
+    bd.op = GPU_BLENDOP_ADD;
+    bd.src_alpha = GPU_BLEND_ONE;
+    bd.dst_alpha = GPU_BLEND_INV_SRC_ALPHA;
+    bd.op_alpha = GPU_BLENDOP_ADD;
+    bd.write_mask = GPU_WRITE_ALL;
+    s_ov_bs = gpu_blend_create(&bd);
     ov_gpu_name();
     return s_ov_ps && s_ov_bs;
 }
@@ -387,51 +371,37 @@ static int ov_paint(int mode, float s, uint32_t bw, uint32_t bh)
 /* Upload the panel's picture, making the texture when its size changed. */
 static int ov_upload(void)
 {
-    D3D11_MAPPED_SUBRESOURCE m;
-    int y;
     if (!s_ov_tex || s_ov_tw != s_ov_bw || s_ov_th != s_ov_bh) {
-        D3D11_TEXTURE2D_DESC td;
-        if (s_ov_srv) { ID3D11ShaderResourceView_Release(s_ov_srv); s_ov_srv = NULL; }
-        if (s_ov_tex) { ID3D11Texture2D_Release(s_ov_tex); s_ov_tex = NULL; }
+        GpuTextureDesc td;
+        if (s_ov_tex) { gpu_texture_release(s_ov_tex); s_ov_tex = NULL; }
         memset(&td, 0, sizeof td);
-        td.Width = (UINT)s_ov_bw; td.Height = (UINT)s_ov_bh; td.MipLevels = 1; td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DYNAMIC;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_ov_tex)))
+        td.width = (uint32_t)s_ov_bw; td.height = (uint32_t)s_ov_bh; td.mips = 1;
+        td.format = GPU_FMT_BGRA8;
+        td.flags = GPU_TEX_SAMPLED;
+        if (!(s_ov_tex = gpu_texture_create(&td, NULL)))
             return 0;
-        ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_ov_tex, NULL, &s_ov_srv);
         s_ov_tw = s_ov_bw;
         s_ov_th = s_ov_bh;
     }
-    if (FAILED(ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)s_ov_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
-        return 0;
-    for (y = 0; y < s_ov_bh; y++)
-        memcpy((uint8_t *)m.pData + (size_t)y * m.RowPitch, s_ov_px + (size_t)y * s_ov_bw, (size_t)s_ov_bw * 4);
-    ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)s_ov_tex, 0);
+    gpu_texture_update(s_ov_tex, 0, 0, s_ov_px, (uint32_t)s_ov_bw * 4);
     return 1;
 }
 
 /* Over window 1's back buffer, after the frame's blit, before Present. */
-static void gpu_overlay_draw(IDXGISwapChain *swap)
+static void gpu_overlay_draw(GpuSwapchain *sc)
 {
     int mode = (int)s_ov_mode;
-    ID3D11Texture2D *bb = NULL;
-    ID3D11RenderTargetView *rtv = NULL;
-    D3D11_TEXTURE2D_DESC bd;
-    D3D11_VIEWPORT vp;
+    GpuTexture *bb, *none = NULL;
+    GpuTextureDesc bd;
+    GpuViewport vp;
     DWORD now = GetTickCount();
     float s;
     if ((int)(s_toast_until - now) > 0)
         mode = 3;                                   /* a message showing */
-    if (!mode || !swap || !ov_init())
+    if (!mode || !sc || !ov_init() || !(bb = gpu_swapchain_begin(sc, 0)))
         return;
-    if (FAILED(IDXGISwapChain_GetBuffer(swap, 0, &IID_ID3D11Texture2D, (void **)&bb)))
-        return;
-    ID3D11Texture2D_GetDesc(bb, &bd);
-    s = (float)bd.Height / 1080.0f;
+    gpu_texture_desc(bb, &bd);
+    s = (float)bd.height / 1080.0f;
     if (s < 0.75f) s = 0.75f;
     if (!s_ov_tex || (mode != 3 && now - s_ov_drawn_at >= (mode == 2 ? 100u : 250u)) || s_ov_font_scale != (int)(s * 100.0f + 0.5f)
             || s_ov_painted_mode != mode || (mode == 3 && s_toast_painted != s_toast_seq)
@@ -439,38 +409,27 @@ static void gpu_overlay_draw(IDXGISwapChain *swap)
         s_ov_drawn_at = now;
         s_ov_painted_mode = mode;
         s_toast_painted = s_toast_seq;
-        if (!ov_paint(mode, s, (uint32_t)s_rw, (uint32_t)s_rh) || !ov_upload()) {
-            ID3D11Texture2D_Release(bb);
+        if (!ov_paint(mode, s, (uint32_t)s_rw, (uint32_t)s_rh) || !ov_upload())
             return;
-        }
     }
-    ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)bb, NULL, &rtv);
-    ID3D11Texture2D_Release(bb);
-    if (!rtv)
-        return;
-    vp.TopLeftX = mode == 3 ? (float)(int)(((int)bd.Width - s_ov_tw) / 2) : (float)(int)(18.0f * s);
-    vp.TopLeftY = mode == 3 ? (float)(int)((float)bd.Height * 0.80f) : (float)(int)(18.0f * s);
-    vp.Width = (float)s_ov_tw;
-    vp.Height = (float)s_ov_th;
-    vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
-    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &rtv, NULL);
-    ID3D11DeviceContext_OMSetBlendState(s_ctx, s_ov_bs, NULL, 0xFFFFFFFFu);
-    ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, NULL, 0);
-    ID3D11DeviceContext_RSSetState(s_ctx, s_blit_rs);
-    ID3D11DeviceContext_RSSetViewports(s_ctx, 1, &vp);
-    ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
-    ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ID3D11DeviceContext_VSSetShader(s_ctx, s_blit_vs, NULL, 0);
-    ID3D11DeviceContext_PSSetShader(s_ctx, s_ov_ps, NULL, 0);
-    ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &s_ov_srv);
-    ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 1, &s_samp[0]);
-    ID3D11DeviceContext_Draw(s_ctx, 3, 0);
-    {
-        ID3D11ShaderResourceView *none = NULL;
-        ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 1, &none);
-    }
-    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
-    ID3D11RenderTargetView_Release(rtv);
+    vp.x = mode == 3 ? (float)(int)(((int)bd.width - s_ov_tw) / 2) : (float)(int)(18.0f * s);
+    vp.y = mode == 3 ? (float)(int)((float)bd.height * 0.80f) : (float)(int)(18.0f * s);
+    vp.w = (float)s_ov_tw;
+    vp.h = (float)s_ov_th;
+    vp.min_z = 0.0f; vp.max_z = 1.0f;
+    gpu_set_targets(bb, NULL);
+    gpu_set_blend(s_ov_bs);
+    gpu_set_depth(NULL, 0);
+    gpu_set_raster(s_blit_rs);
+    gpu_set_viewport(&vp);
+    gpu_set_layout(NULL);
+    gpu_set_topology(GPU_TOPO_TRIANGLES);
+    gpu_set_shaders(s_blit_vs, s_ov_ps);
+    gpu_set_textures(0, 1, &s_ov_tex);
+    gpu_set_samplers(0, 1, &s_gsamp[0]);
+    gpu_draw(3, 0);
+    gpu_set_textures(0, 1, &none);
+    gpu_set_targets(NULL, NULL);
     {
         /* BUFFY_OVERLAY_SHOT=<file.bmp> (testing): the back buffer with the
          * overlay, once, after three seconds of it */
@@ -480,12 +439,8 @@ static void gpu_overlay_draw(IDXGISwapChain *swap)
         if (!first)
             first = now;
         if (shot && !done && now - first > 3000) {
-            ID3D11Texture2D *b2 = NULL;
             done = 1;
-            if (SUCCEEDED(IDXGISwapChain_GetBuffer(swap, 0, &IID_ID3D11Texture2D, (void **)&b2))) {
-                gpu_save_bmp(b2, bd.Width, bd.Height, shot);
-                ID3D11Texture2D_Release(b2);
-            }
+            gpu_save_bmp(bb, bd.width, bd.height, shot);
         }
     }
 }

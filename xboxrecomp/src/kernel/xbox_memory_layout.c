@@ -783,6 +783,11 @@ static void framebuffer_probe_tick(void)
  * RECOMP_GPU_SPIN=1 keeps the old always-spinning behaviour. */
 static volatile LONG g_gpu_hurry;
 static volatile LONGLONG g_gpu_hot_until;
+/* The native renderer draws (xbox_gpu_set_native): the pushbuffer is only
+ * read for its handshakes, and new work always arrives through a KickOff,
+ * which rings the puller's bell -- so it sleeps between batches instead of
+ * staying hot for 2 ms after each. */
+volatile int g_gpu_native;
 static HANDLE g_gpu_bell[2];
 static LONGLONG g_qpc_2ms;
 static int g_gpu_spin = -1;
@@ -797,6 +802,12 @@ static void gpu_idle_init(void)
     g_gpu_bell[0] = CreateEventA(NULL, FALSE, FALSE, NULL);
     g_gpu_bell[1] = CreateEventA(NULL, FALSE, FALSE, NULL);
     g_gpu_spin = getenv("RECOMP_GPU_SPIN") != NULL;
+}
+
+void xbox_gpu_set_native(int on)
+{
+    /* RECOMP_PB_FULL=1: walk and execute everything as before (A/B tests) */
+    g_gpu_native = on != 0 && !getenv("RECOMP_PB_FULL");
 }
 
 /* GPU work just happened: stay responsive for the next 2 ms. */
@@ -829,7 +840,7 @@ void xbox_gpu_idle(int which)
     QueryPerformanceCounter(&now);
     /* The puller also stays hot for 2 ms after work (more is usually coming);
      * the register thread only matters to a title that is waiting. */
-    if (g_gpu_spin || g_gpu_hurry > 0 || (which == 0 && now.QuadPart < g_gpu_hot_until)) {
+    if (g_gpu_spin || g_gpu_hurry > 0 || (which == 0 && !g_gpu_native && now.QuadPart < g_gpu_hot_until)) {
         SwitchToThread();
         return;
     }
@@ -839,6 +850,7 @@ void xbox_gpu_idle(int which)
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
+    fprintf(stderr, "  [THREAD] %lu: GPU register thread\n", GetCurrentThreadId());
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
         for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
             volatile uint32_t *r =

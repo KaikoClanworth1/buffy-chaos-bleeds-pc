@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(xboxrecomp VERSION 0.9.0 LANGUAGES C)
+project(xboxrecomp VERSION 0.9.0 LANGUAGES C CXX)
 
 # Xbox Static Recompilation Runtime Library
 # Provides link-time libraries for statically recompiled Xbox games.
@@ -52,6 +52,10 @@ add_subdirectory(src/usb)
 
 # Input: Xbox gamepad → XInput
 add_subdirectory(src/input)
+
+# GPU layer: the renderer's backends (Direct3D 11, Vulkan) and the
+# HLSL -> SPIR-V compiler the Vulkan one uses
+add_subdirectory(src/gpu)
 
 # Shared FMV player (Media Foundation -> D3D8 texture)
 add_subdirectory(src/video)

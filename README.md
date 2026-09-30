@@ -4,12 +4,12 @@
 
 # Buffy the Vampire Slayer: Chaos Bleeds — PC Port
 
-This is a native Windows port of the 2003 Xbox game *Buffy the Vampire Slayer: Chaos Bleeds*. It isn't an emulator. The game's code is translated to C with [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) and built into an ordinary Windows program. It uses Direct3D 11 for graphics, DirectSound for audio and XInput for controllers.
+This is a native Windows port of the 2003 Xbox game *Buffy the Vampire Slayer: Chaos Bleeds*. It isn't an emulator. The game's code is translated to C with [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) and built into an ordinary Windows program. It uses Vulkan (or Direct3D 11) for graphics, DirectSound for audio and XInput for controllers.
 
 It also adds:
 
 - **Sharp resolutions**: 720p, 1080p, 1440p and 4K, plus the original 4:3 sizes.
-- **A steady 60 fps**, with VSync on or off, from a native Direct3D 11 renderer with plenty of headroom.
+- **A steady 60 fps**, with VSync on or off, from a native Vulkan / Direct3D 11 renderer with plenty of headroom.
 - **A launcher** that installs, configures and starts the game.
 - **Mods**: switch them on and off with a checkbox. The mods don't change the game files on disk.
 - **Story co-op**: a second player can join the campaign, in two windows or on a split screen.
@@ -66,7 +66,7 @@ It also adds:
 | | |
 |---|---|
 | 💿 **The game** | A disc image of your own *Chaos Bleeds* **Xbox** disc, as an `.iso` or `.xiso`. The PS2 and GameCube versions won't work. |
-| 🖥️ **PC** | Windows 10 or 11 (64-bit), with a graphics card that supports Direct3D 11. A **Steam Deck** or Linux PC through Proton should work too, but it's experimental: see [Steam Deck and Linux](#steam-deck-and-linux-proton). |
+| 🖥️ **PC** | Windows 10 or 11 (64-bit), with a graphics card that supports Vulkan 1.3 or Direct3D 11. A **Steam Deck** or Linux PC through Proton should work too, but it's experimental: see [Steam Deck and Linux](#steam-deck-and-linux-proton). |
 | 💾 **Disk space** | About 4 GB for the installed game. |
 | 🎮 **Controller** | Optional. Any XInput (Xbox-style) pad works, and so does the keyboard. Co-op needs a second controller. |
 | 🎬 **FFmpeg** | Optional. It's only used once, during install, to convert the game's movies for PC. The launcher can download it for you. |
@@ -90,12 +90,16 @@ It also adds:
 5. **Mods tab**: tick any mods you want. See the [mods table](#mods-what-each-one-does).
 6. **Play tab**: press **Play**.
 
-Your saves go to `SaveData\` inside the game folder.
+**Saves** are plain files, one per save, in the game folder's `SaveData\` folder (`BUFFY A.sav`, `BUFFY B.sav`, `BUFFY C.sav`). Copy them to back them up or to move them to another PC. The launcher's **Saves** tab backs them up and restores them. Saves from versions before 0.4 used the Xbox layout (`UDATA\`). They're converted the first time you start the game or open the Saves tab, and the originals are kept in `SaveBackups\`. `XboxData\` holds the emulated console's own files, and you can ignore it.
 
 <table>
   <tr>
     <td width="50%"><img src="docs/screenshots/launcher-install.png" alt="Launcher Install tab"><br><sub><b>Install</b>: choose your disc image and a folder</sub></td>
-    <td width="50%"><img src="docs/screenshots/launcher-play.png" alt="Launcher Play tab"><br><sub><b>Play</b></sub></td>
+    <td width="50%"><img src="docs/screenshots/launcher-play.png" alt="Launcher Play tab"><br><sub><b>Play</b>: start the game, check for updates</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/launcher-saves.png" alt="Launcher Saves tab"><br><sub><b>Saves</b>: back up and restore your saves</sub></td>
+    <td width="50%"><img src="docs/screenshots/launcher-advanced.png" alt="Launcher Advanced tab"><br><sub><b>Advanced</b>: export a model, edit it in Blender, make it a character mod</sub></td>
   </tr>
 </table>
 
@@ -141,6 +145,10 @@ From v0.3.0 the launcher updates itself. When it starts, it checks [Releases](ht
 
 Up to **four** XInput controllers work, in any USB or wireless slot. The first controller is player 1, and so is the keyboard. The next controller is player 2, and so on. Each player's pad gets its own rumble.
 
+The keys below are the defaults. You can change any of them, give an action a second key, and set mouse look and its speed on the launcher's **Controls** tab.
+
+<p align="center"><img src="docs/screenshots/launcher-controls.png" alt="Launcher Controls tab" width="60%"></p>
+
 | Xbox button | Controller | Keyboard |
 |---|---|---|
 | Start | Start | `Enter` |
@@ -177,7 +185,7 @@ You can change these in the launcher's **Settings** tab. In the game, **Options 
 | **Windowed / Fullscreen** | Fullscreen is borderless. |
 | **Resolution** | 1920×1080 is the default. 1280×720, 2560×1440 and 3840×2160 are also 16:9. The original 4:3 sizes are 640×480, 1280×960, 1920×1440 and 2560×1920. Menus and movies stay 4:3, with bars at the sides. |
 | **VSync** | Waits for the monitor's refresh, so the picture doesn't tear. |
-| **Renderer** | **Native Direct3D 11** (the default) draws the game's Direct3D calls directly and is much faster. **Emulated Xbox GPU** is the older renderer that emulates the Xbox graphics chip. Keep it as a fallback if something looks wrong, and please report it. |
+| **Renderer** | **Vulkan** (the default) and **Direct3D 11** draw the game's Direct3D calls directly through your graphics card: the same renderer, two graphics APIs. If Vulkan 1.3 isn't available, the game uses Direct3D 11 on its own. Try Direct3D 11 if Vulkan misbehaves on your system. **Emulated Xbox GPU** is the older renderer that emulates the Xbox graphics chip. Keep it as a fallback if something looks wrong, and please report it. |
 | **FPS limit** | 60 (the default) or 30. The game's speed is tied to its frame rate, so it never runs above 60. |
 | **Show FPS counter** | A small frame-rate counter in the top-left corner. |
 | **Debug overlay** | A panel in the top-left corner with the frame rate, average and worst frame time, a graph of recent frame times, the renderer in use, the resolution and VSync, and your graphics card. |
@@ -346,6 +354,11 @@ The translated game code is **generated on your machine from your own disc**. It
 
 **Steps:**
 
+0. Clone with the submodules (the Vulkan renderer's libraries: glslang, Vulkan-Headers, volk and VMA; no Vulkan SDK needed):
+   ```bash
+   git clone --recursive https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc.git
+   ```
+   In a clone you already have, run `git submodule update --init` instead.
 1. Unpack your disc into `game_files/` at the root of this repository. You need `DEFAULT.XBE`, `Buffy.map` and the `Buffy/` data folder. Either:
    - run xboxrecomp's unpacker:
      ```bash
@@ -399,7 +412,7 @@ The translated game code is **generated on your machine from your own disc**. It
 | | Who | What |
 |---|---|---|
 | 🧑‍💻 | [**KaikoClanworth1**](https://github.com/KaikoClanworth1) | Project lead: direction, design, testing and playing. |
-| 🤖 | [**Claude Code**](https://claude.com/claude-code) (Anthropic) | AI coding assistant: wrote most of the port. That includes the recompiler integration, the Direct3D 11 renderer and runtime fixes, audio, input, movies, the launcher, the mods system and story co-op, plus the tools and this README. |
+| 🤖 | [**Claude Code**](https://claude.com/claude-code) (Anthropic) | AI coding assistant: wrote most of the port. That includes the recompiler integration, the Vulkan and Direct3D 11 renderer and runtime fixes, audio, input, movies, the launcher, the mods system and story co-op, plus the tools and this README. |
 | 🛠️ | [**sp00nznet**](https://github.com/sp00nznet) | [xboxrecomp](https://github.com/sp00nznet/xboxrecomp), the static recompiler this port is built on. |
 
 > **AI disclosure:** this port was developed with Claude Code. Its commits carry a `Co-Authored-By: Claude` line. Every change was run and tested on the project lead's own PC.

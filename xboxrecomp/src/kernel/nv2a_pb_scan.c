@@ -283,6 +283,19 @@ static void pgraph_mirror_clear_values(void)
     *(volatile uint32_t *)(m + 0xFD40186Cu) = nv2a_pb_kelvin(0x1D90);
 }
 
+/* Native renderer (xbox_gpu_set_native): the bulk of the stream is draw data
+ * it takes from the D3D library's own calls instead -- index lists, inline
+ * vertices, vertex programs and their constants, ~10 million words a
+ * second. Those commands are stepped over whole; fences, semaphores, flips,
+ * software methods and the rest of the state still go to the executor. */
+extern volatile int g_gpu_native;
+
+static int native_skips(uint32_t subch, uint32_t method)
+{
+    return subch == 0 && ((method >= 0x1800u && method <= 0x181Cu)      /* ARRAY_ELEMENT16/32, DRAW_ARRAYS, INLINE_ARRAY */
+                          || (method >= 0x0B00u && method <= 0x0BFCu)); /* TRANSFORM_PROGRAM / _CONSTANT */
+}
+
 static DWORD WINAPI pb_fifo_thread(LPVOID param)
 {
     volatile uint32_t *put_reg = (volatile uint32_t *)((char *)param + 0x800040u);
@@ -291,6 +304,7 @@ static DWORD WINAPI pb_fifo_thread(LPVOID param)
     uint32_t get = 0, ret_addr = 0;
 
     s_exec_enabled = 1;
+    fprintf(stderr, "  [THREAD] %lu: pushbuffer puller\n", GetCurrentThreadId());
     s_fence_trace = getenv("RECOMP_PB_FENCE_TRACE") != NULL;
     s_prof = getenv("RECOMP_PB_PROFILE") != NULL;
     s_slow = getenv("RECOMP_PB_SLOW") != NULL;
@@ -419,6 +433,11 @@ static DWORD WINAPI pb_fifo_thread(LPVOID param)
                 uint32_t method =  w & 0x1FFCu;
                 int noninc = (w & 0xE0000000u) == 0x40000000u;
                 uint32_t i;
+                if (g_gpu_native && native_skips(subch, method)
+                        && native_skips(subch, noninc ? method : method + (count ? count - 1 : 0) * 4u)) {
+                    get += count * 4u;
+                    continue;
+                }
                 for (i = 0; i < count; i++) {
                     uint32_t m = noninc ? method : method + i * 4;
                     uint32_t v = *(const uint32_t *)(mem + PB_PHYS(get));

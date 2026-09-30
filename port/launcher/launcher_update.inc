@@ -8,7 +8,7 @@
  * it (unzip.c; tar.exe as a fallback - Wine / Proton has none) and puts its files over the launcher folder and
  * the game folder: the programs, the Visual C++ runtime, the read-me, the
  * compiled shaders and the mods that come with the release. Nothing else is
- * touched: saved games (UDATA, TDATA, SaveData), settings, launcher.ini, the
+ * touched: saved games (SaveData, and UDATA / TDATA from before 0.4), settings, launcher.ini, the
  * game's data from the disc and the player's own mods stay as they are. A mod
  * that came with the release is replaced only when the new release has a new
  * version of it (its old mod.ini is kept as mod.ini.old); which mods are on

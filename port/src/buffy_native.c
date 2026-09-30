@@ -12,13 +12,14 @@
  * per-frame summary, and every draw of one frame in full, to check the
  * capture against what the emulated renderer draws. Drawing comes next.
  *
- * Renderer choice: [Display] Renderer = native (the default) | emulated in
- * buffy_settings.ini, or BUFFY_RENDERER. The emulated renderer stays as the
+ * Renderer choice: [Display] Renderer = vulkan (the default) | d3d11 |
+ * emulated in buffy_settings.ini, or BUFFY_RENDERER. vulkan and d3d11 are
+ * the native renderer through the GPU layer's two backends (vulkan falls
+ * back to Direct3D 11 without Vulkan 1.3; BUFFY_GPU_BACKEND overrides).
+ * "native" (0.3 and before: the default) is the default now: vulkan. The emulated renderer stays as the
  * fallback (and when no Direct3D 11 device comes up) and for A/B comparison.
  */
-#define COBJMACROS
 #include <windows.h>
-#include <d3d11.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -26,11 +27,11 @@
 
 #include "recomp/gen/recomp_types.h"
 #include "buffy_settings.h"
+#include "gpu.h"                  /* the GPU layer (xboxrecomp/src/gpu) */
 
-int  nv2a_gpu_native_begin(ID3D11Device **dev, ID3D11DeviceContext **ctx);
+int  nv2a_gpu_native_begin(void);
 void nv2a_gpu_native_scale(float *sx, float *sy);
-void nv2a_gpu_native_present(ID3D11Texture2D *tex, ID3D11ShaderResourceView *srv,
-                             uint32_t w, uint32_t h, uint32_t pw, uint32_t ph);
+void nv2a_gpu_native_present(GpuTexture *tex, uint32_t w, uint32_t h, uint32_t pw, uint32_t ph);
 
 /* getenv, remembered: debug switches are checked on every draw, and the
  * CRT's getenv walks the whole environment each time. */
@@ -52,24 +53,33 @@ static const char *nenv(const char *name)
 
 /* ── the native device and frame (game thread only) ────────────────────── */
 
-static ID3D11Device        *s_dev;
-static ID3D11DeviceContext *s_ctx;
+static int s_gpu_up;                       /* the device is up (nv2a_gpu_native_begin) */
 static struct {
-    ID3D11Texture2D          *tex, *ztex;
-    ID3D11RenderTargetView   *rtv;
-    ID3D11ShaderResourceView *srv;
-    ID3D11DepthStencilView   *dsv;
+    GpuTexture *tex, *z;                    /* colour (a target, sampled when shown), depth */
     uint32_t pw, ph;
 } s_fb;                                     /* the frame: the game's 640x480 at the output scale */
 
 static void fb_release(void)
 {
-    if (s_fb.rtv) ID3D11RenderTargetView_Release(s_fb.rtv);
-    if (s_fb.srv) ID3D11ShaderResourceView_Release(s_fb.srv);
-    if (s_fb.dsv) ID3D11DepthStencilView_Release(s_fb.dsv);
-    if (s_fb.tex) ID3D11Texture2D_Release(s_fb.tex);
-    if (s_fb.ztex) ID3D11Texture2D_Release(s_fb.ztex);
+    if (s_fb.tex) gpu_texture_release(s_fb.tex);
+    if (s_fb.z) gpu_texture_release(s_fb.z);
     memset(&s_fb, 0, sizeof s_fb);
+}
+
+/* A colour target (sampled too) and its depth buffer, pw x ph. */
+static int make_targets(uint32_t pw, uint32_t ph, GpuTexture **tex, GpuTexture **z)
+{
+    GpuTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.width = pw; td.height = ph; td.mips = 1;
+    td.format = GPU_FMT_BGRA8;
+    td.flags = GPU_TEX_TARGET | GPU_TEX_SAMPLED;
+    if (!(*tex = gpu_texture_create(&td, NULL)))
+        return 0;
+    td.format = GPU_FMT_D24S8;
+    td.flags = GPU_TEX_DEPTH;
+    *z = gpu_texture_create(&td, NULL);
+    return 1;
 }
 
 /* The frame's targets, (re)made to the current output scale. */
@@ -77,8 +87,7 @@ static int fb_ready(void)
 {
     float sx, sy;
     uint32_t pw, ph;
-    D3D11_TEXTURE2D_DESC td;
-    if (!s_dev)
+    if (!s_gpu_up)
         return 0;
     nv2a_gpu_native_scale(&sx, &sy);
     pw = (uint32_t)(640 * sx + 0.5f);
@@ -86,19 +95,8 @@ static int fb_ready(void)
     if (s_fb.tex && s_fb.pw == pw && s_fb.ph == ph)
         return 1;
     fb_release();
-    memset(&td, 0, sizeof td);
-    td.Width = pw; td.Height = ph; td.MipLevels = 1; td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    td.SampleDesc.Count = 1;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_fb.tex)))
+    if (!make_targets(pw, ph, &s_fb.tex, &s_fb.z))
         return 0;
-    ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)s_fb.tex, NULL, &s_fb.rtv);
-    ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_fb.tex, NULL, &s_fb.srv);
-    td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_fb.ztex)))
-        ID3D11Device_CreateDepthStencilView(s_dev, (ID3D11Resource *)s_fb.ztex, NULL, &s_fb.dsv);
     s_fb.pw = pw;
     s_fb.ph = ph;
     fprintf(stderr, "[NATIVE] frame %ux%u\n", pw, ph);
@@ -135,14 +133,16 @@ int buffy_native_mode(void)
         if (e)
             strncpy_s(v, sizeof v, e, _TRUNCATE);
         else if (ini && *ini)
-            GetPrivateProfileStringA("Display", "Renderer", "native", v, sizeof v, ini);
+            GetPrivateProfileStringA("Display", "Renderer", "vulkan", v, sizeof v, ini);
         s_mode = _stricmp(v, "emulated") != 0;   /* native unless asked otherwise */
+        if (s_mode && !getenv("BUFFY_GPU_BACKEND"))
+            _putenv_s("BUFFY_GPU_BACKEND", !_stricmp(v, "d3d11") ? "d3d11" : "vulkan");
         if (s_mode) {
             /* the device comes up here, on this (the game's) thread, which
              * owns its context from now on; the emulated renderer only keeps
              * the D3D library's bookkeeping */
-            if (!nv2a_gpu_native_begin(&s_dev, &s_ctx)) {
-                fprintf(stderr, "[NATIVE] no Direct3D 11 device: using the emulated renderer\n");
+            if (!(s_gpu_up = nv2a_gpu_native_begin())) {
+                fprintf(stderr, "[NATIVE] no GPU device: using the emulated renderer\n");
                 s_mode = 0;
             } else {
                 void nv2a_native_const_pool(void);
@@ -247,11 +247,16 @@ void buffy_native_frame(void)
         extern double g_native_present_ms;
         if (!f.QuadPart) QueryPerformanceFrequency(&f);
         QueryPerformanceCounter(&t);
-        fprintf(stderr, "[NFRAME] %ld dt %.2f present %.2f idx %u up %u begin %u push %u clear %u rt %u\n", s_frame,
+        extern double g_native_draw_ms;
+        fprintf(stderr, "[NFRAME] %ld draws %.2f ms dt %.2f present %.2f idx %u up %u begin %u push %u clear %u rt %u\n", s_frame, g_native_draw_ms,
                 t0.QuadPart ? (double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart : 0.0,
                 g_native_present_ms, s_count[PATH_INDEXED], s_count[PATH_UP], s_count[PATH_BEGIN],
                 s_count[PATH_PUSH], s_count[PATH_CLEAR], s_count[PATH_RT]);
         t0 = t;
+    }
+    {
+        extern double g_native_draw_ms;
+        g_native_draw_ms = 0;
     }
     memset(s_count, 0, sizeof s_count);
     s_prims = 0;
@@ -271,7 +276,7 @@ void buffy_native_check(void)
 
 /* nv2a_native.inc's interface */
 typedef struct { uint32_t va, stride, fmt; } NativeAttr;
-typedef struct { uint32_t res, palette, data, format; ID3D11ShaderResourceView *srv; } NativeTex;
+typedef struct { uint32_t res, palette, data, format; GpuTexture *srv; } NativeTex;
 typedef struct {
     uint32_t prim, count, index_va;
     NativeAttr attr[16];
@@ -281,7 +286,7 @@ typedef struct {
     int pixel_shader;
     const uint32_t *rs, *tss;
 } NativeDraw;
-int  nv2a_native_draw(const NativeDraw *d, ID3D11RenderTargetView *rtv, ID3D11DepthStencilView *dsv,
+int  nv2a_native_draw(const NativeDraw *d, GpuTexture *rt, GpuTexture *ds,
                       uint32_t pw, uint32_t ph, uint32_t sw, uint32_t sh);
 void nv2a_native_vp_load(uint32_t slot, const uint32_t *code, uint32_t dwords);
 void nv2a_native_const(uint32_t slot, const float *v, uint32_t vectors);
@@ -304,10 +309,7 @@ static uint32_t s_cur_rt, s_backbuffer;     /* render target now; the one shown 
 typedef struct {
     uint32_t data, w, h;
     uint32_t pw, ph;
-    ID3D11Texture2D *tex, *ztex;
-    ID3D11RenderTargetView *rtv;
-    ID3D11ShaderResourceView *srv;
-    ID3D11DepthStencilView *dsv;
+    GpuTexture *tex, *z;
     DWORD last_use;
 } NativeRT;
 #define NATIVE_RTS 32
@@ -320,7 +322,6 @@ static NativeRT *rt_for(uint32_t surf)
     uint32_t data = MEM32(surf + 4), size = MEM32(surf + 0x10), w, h;
     float sx, sy;
     int i, lru = 0;
-    D3D11_TEXTURE2D_DESC td;
     NativeRT *r;
     if (!data)
         return NULL;
@@ -341,34 +342,21 @@ static NativeRT *rt_for(uint32_t surf)
         if (s_rts[i].last_use < s_rts[lru].last_use) lru = i;
     }
     r = &s_rts[lru];
-    if (r->rtv) ID3D11RenderTargetView_Release(r->rtv);
-    if (r->srv) ID3D11ShaderResourceView_Release(r->srv);
-    if (r->dsv) ID3D11DepthStencilView_Release(r->dsv);
-    if (r->tex) ID3D11Texture2D_Release(r->tex);
-    if (r->ztex) ID3D11Texture2D_Release(r->ztex);
+    if (r->tex) gpu_texture_release(r->tex);     /* (a draw recorded for interpolation keeps its own reference) */
+    if (r->z) gpu_texture_release(r->z);
     memset(r, 0, sizeof *r);
     nv2a_gpu_native_scale(&sx, &sy);
-    memset(&td, 0, sizeof td);
-    td.Width = (UINT)(w * sx + 0.5f); td.Height = (UINT)(h * sy + 0.5f);
-    td.MipLevels = 1; td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    td.SampleDesc.Count = 1;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &r->tex)))
+    r->pw = (uint32_t)(w * sx + 0.5f);
+    r->ph = (uint32_t)(h * sy + 0.5f);
+    if (!make_targets(r->pw, r->ph, &r->tex, &r->z))
         return NULL;
-    ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)r->tex, NULL, &r->rtv);
-    ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)r->tex, NULL, &r->srv);
-    td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &r->ztex)))
-        ID3D11Device_CreateDepthStencilView(s_dev, (ID3D11Resource *)r->ztex, NULL, &r->dsv);
-    r->data = data; r->w = w; r->h = h; r->pw = td.Width; r->ph = td.Height;
+    r->data = data; r->w = w; r->h = h;
     r->last_use = GetTickCount();
     {
         float black[4] = { 0, 0, 0, 0 };
-        ID3D11DeviceContext_ClearRenderTargetView(s_ctx, r->rtv, black);
-        if (r->dsv)
-            ID3D11DeviceContext_ClearDepthStencilView(s_ctx, r->dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+        gpu_clear_target(r->tex, black);
+        if (r->z)
+            gpu_clear_depth(r->z, GPU_CLEAR_DEPTH | GPU_CLEAR_STENCIL, 1.0f, 0);
     }
     if (log_on())
         fprintf(stderr, "[NATIVE] render target %08X %ux%u\n", data, w, h);
@@ -376,19 +364,18 @@ static NativeRT *rt_for(uint32_t surf)
 }
 
 /* The render target a texture's texels are, if the game rendered them. */
-static ID3D11ShaderResourceView *rt_texture(uint32_t data)
+static GpuTexture *rt_texture(uint32_t data)
 {
     int i;
     for (i = 0; i < NATIVE_RTS; i++)
         if (s_rts[i].tex && s_rts[i].data == data)
-            return s_rts[i].srv;
+            return s_rts[i].tex;
     return NULL;
 }
 
 /* Where draws and clears go now: the frame, or a render target. */
 typedef struct {
-    ID3D11RenderTargetView *rtv;
-    ID3D11DepthStencilView *dsv;
+    GpuTexture *rt, *ds;
     uint32_t pw, ph, sw, sh;
 } NativeTarget;
 
@@ -400,10 +387,10 @@ static int target_now(NativeTarget *t)
         NativeRT *r = rt_for(s_cur_rt);
         if (!r)
             return 0;
-        t->rtv = r->rtv; t->dsv = r->dsv; t->pw = r->pw; t->ph = r->ph; t->sw = r->w; t->sh = r->h;
+        t->rt = r->tex; t->ds = r->z; t->pw = r->pw; t->ph = r->ph; t->sw = r->w; t->sh = r->h;
         return 1;
     }
-    t->rtv = s_fb.rtv; t->dsv = s_fb.dsv; t->pw = s_fb.pw; t->ph = s_fb.ph; t->sw = 640; t->sh = 480;
+    t->rt = s_fb.tex; t->ds = s_fb.z; t->pw = s_fb.pw; t->ph = s_fb.ph; t->sw = 640; t->sh = 480;
     return 1;
 }
 /* SwitchTexture: a stage's texels and format set straight into the GPU,
@@ -582,7 +569,16 @@ static void native_draw(uint32_t prim, uint32_t count, uint32_t index_va, uint32
             fprintf(stderr, "[NATIVE] vs %08X flags %08X start %u c58 %g %g %g %g c59 %g %g %g %g\n", vs,
                     vs ? MEM32(vs + 4) : 0, d.vp_start, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     }
-    nv2a_native_draw(&d, tg.rtv, tg.dsv, tg.pw, tg.ph, tg.sw, tg.sh);
+    {
+        /* (BUFFY_NATIVE_FRAMELOG: the draws' own time a frame) */
+        extern double g_native_draw_ms;
+        LARGE_INTEGER a, b, f;
+        QueryPerformanceCounter(&a);
+        nv2a_native_draw(&d, tg.rt, tg.ds, tg.pw, tg.ph, tg.sw, tg.sh);
+        QueryPerformanceCounter(&b);
+        QueryPerformanceFrequency(&f);
+        g_native_draw_ms += (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart;
+    }
 }
 
 /* ── vertex programs and constants (the library writes them to the GPU
@@ -800,18 +796,17 @@ void D3DDevice_Clear_0013A350(void)
         NativeTarget tg;
         if (s_mode == 1 && target_now(&tg)) {
             {
-                void nv2a_native_interp_clear(ID3D11RenderTargetView *rtv, UINT flags, const float c[4], float z, UINT8 stencil);
+                void nv2a_native_interp_clear(GpuTexture *rt, unsigned flags, const float c[4], float z, uint8_t stencil);
                 float c[4] = { ((color >> 16) & 255) / 255.0f, ((color >> 8) & 255) / 255.0f,
                                (color & 255) / 255.0f, (color >> 24) / 255.0f };
                 if (flags & 0xF0)
-                    ID3D11DeviceContext_ClearRenderTargetView(s_ctx, tg.rtv, c);
+                    gpu_clear_target(tg.rt, c);
                 if (flags & 0xF3)
-                    nv2a_native_interp_clear(tg.rtv, flags, c, z, (UINT8)MEM32(g_esp + 24));
+                    nv2a_native_interp_clear(tg.rt, flags, c, z, (uint8_t)MEM32(g_esp + 24));
             }
-            if ((flags & 3) && tg.dsv)
-                ID3D11DeviceContext_ClearDepthStencilView(s_ctx, tg.dsv,
-                    ((flags & 1) ? D3D11_CLEAR_DEPTH : 0) | ((flags & 2) ? D3D11_CLEAR_STENCIL : 0),
-                    z, (UINT8)MEM32(g_esp + 24));
+            if ((flags & 3) && tg.ds)
+                gpu_clear_depth(tg.ds, ((flags & 1) ? GPU_CLEAR_DEPTH : 0) | ((flags & 2) ? GPU_CLEAR_STENCIL : 0),
+                                z, (uint8_t)MEM32(g_esp + 24));
         }
     }
     D3DDevice_Clear_0013A350_orig();
@@ -823,15 +818,17 @@ double g_native_present_ms;                 /* the last present, for BUFFY_NATIV
 /* Frame interpolation: on when asked for, in one window (co-op's second
  * window and split screen show every frame as they are), and where a frame
  * between can be seen -- vsync off, or a display at 100 Hz or more. */
-void nv2a_native_interp_setup(int on, ID3D11RenderTargetView *main_rtv);
-int  nv2a_native_interp_render(float t, ID3D11Texture2D *main_tex, ID3D11Texture2D **out_tex, ID3D11ShaderResourceView **out_srv);
+void nv2a_native_interp_setup(int on, GpuTexture *main);
+int  nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_tex);
 void nv2a_native_interp_frame_end(void);
-void nv2a_gpu_native_present_extra(ID3D11Texture2D *tex, ID3D11ShaderResourceView *srv, uint32_t w, uint32_t h, uint32_t pw, uint32_t ph);
+void nv2a_gpu_native_present_extra(GpuTexture *tex, uint32_t w, uint32_t h, uint32_t pw, uint32_t ph);
 int  nv2a_gpu_vsync(void);
 int  nv2a_gpu_has_second_window(void);
 int  buffy_settings_frame_interpolation(void);
 
 static LARGE_INTEGER s_last_real;          /* the last real frame's present */
+double g_native_draw_ms;                   /* this frame's draws, host time (BUFFY_NATIVE_FRAMELOG) */
+LARGE_INTEGER g_frame_begin;               /* this frame's work began (the last Swap returned) */
 int buffy_settings_fps_limit(void);
 
 static int interp_active(void)
@@ -875,17 +872,38 @@ void buffy_native_present(void)
         /* the in-between frame half a frame after the last real one, the real
          * one a frame after it -- or at once when the work ran past that
          * (the frame in between never holds the game back) */
-        ID3D11Texture2D *it = NULL;
-        ID3D11ShaderResourceView *isrv = NULL;
+        GpuTexture *it = NULL;
         LARGE_INTEGER f, now;
         double since, frame_ms = buffy_settings_fps_limit() == 30 ? 33.333 : 16.667;
         QueryPerformanceFrequency(&f);
         QueryPerformanceCounter(&now);
         since = s_last_real.QuadPart ? (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart : 1e9;
-        if (since < 200.0 && nv2a_native_interp_render(0.5f, s_fb.tex, &it, &isrv)) {
+        LARGE_INTEGER q0, q1, q2, q3;
+        static double cost = 1.0;            /* what the frame in between took lately (ms) */
+        double work;
+        int ok;
+        QueryPerformanceCounter(&q0);
+        /* too late for one: this frame's work left no room for it. With vsync
+         * (a 100 Hz+ display) it has to make the refresh halfway through the
+         * frame -- one later and the real frame misses its own, a whole
+         * refresh late (the pause menu, 11-13 ms of work: 40 fps); without,
+         * it has to leave the real frame its time. The frame's own work is
+         * measured from when the last Swap returned: the time since the last
+         * present also holds the 60 fps limiter's wait. */
+        work = g_frame_begin.QuadPart ? (double)(q0.QuadPart - g_frame_begin.QuadPart) * 1000.0 / (double)f.QuadPart : 0.0;
+        ok = since < 200.0
+             && work + cost < (nv2a_gpu_vsync() ? frame_ms * 0.5 - 0.5 : frame_ms - 1.0)
+             && nv2a_native_interp_render(0.5f, s_fb.tex, &it);
+        QueryPerformanceCounter(&q1);
+        if (ok)
+            cost = cost * 0.9 + 0.1 * ((double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)f.QuadPart + 0.2);
+        q2 = q3 = q1;
+        if (ok) {
             if (!nv2a_gpu_vsync() && since < frame_ms * 0.5)
                 wait_ms(frame_ms * 0.5 - since);
-            nv2a_gpu_native_present_extra(it, isrv, 640, 480, s_fb.pw, s_fb.ph);
+            QueryPerformanceCounter(&q2);
+            nv2a_gpu_native_present_extra(it, 640, 480, s_fb.pw, s_fb.ph);
+            QueryPerformanceCounter(&q3);
             if (!nv2a_gpu_vsync()) {
                 QueryPerformanceCounter(&now);
                 since = (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart;
@@ -893,12 +911,18 @@ void buffy_native_present(void)
                     wait_ms(frame_ms - 0.5 - since);
             }
         }
+        if (nenv("BUFFY_NATIVE_FRAMELOG"))
+            fprintf(stderr, "[NINTERP] work %.2f since %.2f render %.2f wait %.2f extra %.2f ok %d\n",
+                    work, (double)(q0.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart,
+                    (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)f.QuadPart,
+                    (double)(q2.QuadPart - q1.QuadPart) * 1000.0 / (double)f.QuadPart,
+                    (double)(q3.QuadPart - q2.QuadPart) * 1000.0 / (double)f.QuadPart, ok);
     }
     {
         LARGE_INTEGER f, a, b;
         QueryPerformanceFrequency(&f);
         QueryPerformanceCounter(&a);
-        nv2a_gpu_native_present(s_fb.tex, s_fb.srv, 640, 480, s_fb.pw, s_fb.ph);
+        nv2a_gpu_native_present(s_fb.tex, 640, 480, s_fb.pw, s_fb.ph);
         if (nenv("BUFFY_TEST_PRESENT_MS"))
             Sleep((DWORD)atoi(nenv("BUFFY_TEST_PRESENT_MS")));   /* test: a present that waits, as in fullscreen */
         QueryPerformanceCounter(&b);
@@ -906,7 +930,7 @@ void buffy_native_present(void)
     }
     QueryPerformanceCounter(&s_last_real);                /* (the in-between frame's clock) */
     nv2a_native_interp_frame_end();
-    nv2a_native_interp_setup(interp, s_fb.rtv);          /* (the next frame is recorded for it) */
+    nv2a_native_interp_setup(interp, s_fb.tex);          /* (the next frame is recorded for it) */
     if (log_on()) {
         static DWORD last;
         if (GetTickCount() - last >= 2000) {

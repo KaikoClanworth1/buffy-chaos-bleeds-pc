@@ -34,8 +34,7 @@ static const GUID tp_GUID_WICPixelFormat32bppBGRA =
 typedef struct {
     uint64_t hash;
     WCHAR   *path;
-    ID3D11Texture2D          *tex;
-    ID3D11ShaderResourceView *srv;
+    GpuTexture *tex;
     int      failed;
 } TpEntry;
 
@@ -286,10 +285,10 @@ static void tp_scan(const WCHAR *dir, int depth)
 }
 
 /* BGRA image -> immutable texture with a full box-filtered mip chain. */
-static int tp_make_texture(uint32_t *px, uint32_t w, uint32_t h, ID3D11Texture2D **tex, ID3D11ShaderResourceView **srv)
+static int tp_make_texture(uint32_t *px, uint32_t w, uint32_t h, GpuTexture **tex)
 {
-    D3D11_TEXTURE2D_DESC td;
-    D3D11_SUBRESOURCE_DATA sub[15];
+    GpuTextureDesc td;
+    GpuSubresource sub[15];
     uint32_t *lv[15];
     uint32_t levels = 1, l, lw = w, lh = h;
     int ok = 0;
@@ -319,26 +318,16 @@ static int tp_make_texture(uint32_t *px, uint32_t w, uint32_t h, ID3D11Texture2D
         lw = nw; lh = nh;
     }
     memset(&td, 0, sizeof td);
-    td.Width = w; td.Height = h; td.MipLevels = levels; td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_IMMUTABLE;
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.width = w; td.height = h; td.mips = levels;
+    td.format = GPU_FMT_BGRA8;
+    td.flags = GPU_TEX_SAMPLED;
     lw = w;
     for (l = 0; l < levels; l++) {
-        sub[l].pSysMem = lv[l];
-        sub[l].SysMemPitch = lw * 4;
-        sub[l].SysMemSlicePitch = 0;
+        sub[l].data = lv[l];
+        sub[l].pitch = lw * 4;
         lw = lw > 1 ? lw / 2 : 1;
     }
-    if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, sub, tex))) {
-        if (SUCCEEDED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)*tex, NULL, srv)))
-            ok = 1;
-        else {
-            ID3D11Texture2D_Release(*tex);
-            *tex = NULL;
-        }
-    }
+    ok = (*tex = gpu_texture_create(&td, sub)) != NULL;
     for (l = 1; l < levels; l++)
         free(lv[l]);
     return ok;
@@ -348,21 +337,18 @@ static int tp_make_texture(uint32_t *px, uint32_t w, uint32_t h, ID3D11Texture2D
 static void tp_load_entry(IWICImagingFactory *f, TpEntry *e)
 {
     uint32_t w = 0, h = 0, *px;
-    ID3D11Texture2D *tex = NULL;
-    ID3D11ShaderResourceView *srv = NULL;
+    GpuTexture *tex = NULL;
     int ok = 0;
     px = f ? tp_read_image(f, e->path, &w, &h) : NULL;
     if (px) {
-        ok = tp_make_texture(px, w, h, &tex, &srv);
+        ok = tp_make_texture(px, w, h, &tex);
         free(px);
     }
     EnterCriticalSection(&s_tp.lock);
-    if (e->srv || e->failed) {
-        if (srv) ID3D11ShaderResourceView_Release(srv);
-        if (tex) ID3D11Texture2D_Release(tex);
+    if (e->tex || e->failed) {
+        if (tex) gpu_texture_release(tex);
     } else if (ok) {
         e->tex = tex;
-        e->srv = srv;
         s_tp.loaded++;
     } else {
         e->failed = 1;
@@ -378,7 +364,7 @@ static DWORD WINAPI tp_prefetch_thread(LPVOID arg)
     DWORD t0 = GetTickCount();
     (void)arg;
     for (i = 0; i < s_tp.cap; i++)
-        if (s_tp.ent[i].path && !s_tp.ent[i].srv && !s_tp.ent[i].failed)
+        if (s_tp.ent[i].path && !s_tp.ent[i].tex && !s_tp.ent[i].failed)
             tp_load_entry(f, &s_tp.ent[i]);
     fprintf(stderr, "  [TEXPACK] prefetched %u replacements in %lu ms\n", s_tp.loaded, GetTickCount() - t0);
     if (f) IWICImagingFactory_Release(f);
@@ -509,24 +495,22 @@ static void tp_init(void)
     }
 }
 
-/* The replacement for `hash`, AddRef'd into *tex / *srv, or 0. */
-static int tp_replacement(uint64_t hash, ID3D11Texture2D **tex, ID3D11ShaderResourceView **srv)
+/* The replacement for `hash`, AddRef'd into *tex, or 0. */
+static int tp_replacement(uint64_t hash, GpuTexture **tex)
 {
     static IWICImagingFactory *f;
     TpEntry *e;
     int ok = 0;
     if (!s_tp.load || !s_tp.n || !(e = tp_find(hash)))
         return 0;
-    if (!e->srv && !e->failed) {
+    if (!e->tex && !e->failed) {
         if (!f) f = tp_wic();
         tp_load_entry(f, e);
     }
     EnterCriticalSection(&s_tp.lock);
-    if (e->srv) {
-        ID3D11Texture2D_AddRef(e->tex);
-        ID3D11ShaderResourceView_AddRef(e->srv);
+    if (e->tex) {
+        gpu_texture_addref(e->tex);
         *tex = e->tex;
-        *srv = e->srv;
         ok = 1;
     }
     LeaveCriticalSection(&s_tp.lock);

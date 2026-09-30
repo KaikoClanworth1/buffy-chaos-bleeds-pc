@@ -538,6 +538,15 @@ void xbox_kernel_set_ordinal_remap(const unsigned short *map, int count);
 
 /* Initialize path translation with base directories */
 void xbox_path_init(const char* game_dir, const char* save_dir);
+#ifdef _WIN32
+/* A title's own place for U:\ files: called with what follows "U:\"; TRUE and
+ * the host path in out when it takes the file, FALSE for the usual
+ * <save_dir>\UserData. (Buffy: each save one plain file, buffy_saves.c.) */
+void xbox_path_set_user_mapper(BOOL (*mapper)(const char *rest, WCHAR *out, DWORD n));
+/* Where \Device\Harddisk0\Partition1\ (the hard disk: UDATA, TDATA) goes,
+ * instead of the game folder. */
+void xbox_path_set_hdd_dir(const char *dir);
+#endif
 
 /*
  * Character type of a translated host path. The Win32 file APIs take wide

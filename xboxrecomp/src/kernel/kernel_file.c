@@ -178,6 +178,15 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         }
     }
 
+    /* A device that is a folder on the PC (a partition with no disk image)
+     * opened as a plain file: a directory handle does for what a device open
+     * is for, the volume queries. */
+    if (!(CreateOptions & XBOX_FILE_DIRECTORY_FILE)) {
+        DWORD a = GetFileAttributesW(win_path);
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY))
+            CreateOptions |= XBOX_FILE_DIRECTORY_FILE;
+    }
+
     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
         if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
             CreateDirectoryW(win_path, NULL);

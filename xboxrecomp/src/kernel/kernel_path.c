@@ -242,6 +242,8 @@ static void xbox_write_partition_table(const WCHAR *path)
  * The rest start empty, which is what an unformatted partition looks like, so
  * a title that wants a filesystem there formats one.
  */
+static WCHAR s_hdd_dir[MAX_PATH];     /* xbox_path_set_hdd_dir (below) */
+
 static BOOL xbox_partition_device_path(const char *xbox_path, WCHAR *out, DWORD n)
 {
     static const char *prefix = "\\Device\\Harddisk0\\Partition";
@@ -262,6 +264,13 @@ static BOOL xbox_partition_device_path(const char *xbox_path, WCHAR *out, DWORD 
     if (*rest != '\0')
         return FALSE;
 
+    /* With a hard-disk folder (xbox_path_set_hdd_dir) there are no disk
+     * images: the device is that folder (partition 1) or the save folder (the
+     * rest), which answers the volume queries a device open is made for. */
+    if (s_hdd_dir[0]) {
+        wcscpy_s(out, n, digit == '1' ? s_hdd_dir : s_save_dir);
+        return TRUE;
+    }
     swprintf_s(out, n, L"%s\\Partition%c.img", s_save_dir, (WCHAR)digit);
     return TRUE;
 }
@@ -322,6 +331,7 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
             SHCreateDirectoryExW(NULL, dir, NULL);
         }
         swprintf_s(image, MAX_PATH, L"%s\\%s", s_save_dir, XBOX_DISK_IMAGE_NAME);
+        if (!s_hdd_dir[0])                   /* (no images with a hard-disk folder) */
         xbox_write_partition_table(image);
         /* The other partition devices, sized to the same geometry the table
          * above describes, so a title that asks the device how big it is gets
@@ -337,7 +347,7 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
                 0x00177000ull, /* 4: Y: cache                     */
                 0x00177000ull, /* 5: Z: cache                     */
             };
-            for (int p = 1; p <= 5; p++) {
+            for (int p = 1; p <= 5 && !s_hdd_dir[0]; p++) {
                 HANDLE h;
                 DWORD ret;
                 LARGE_INTEGER end;
@@ -378,6 +388,23 @@ static void xbox_remember_host_path(const wchar_t *p)
 
 
 
+/* A title's own U:\ files, and the hard disk's folder (kernel.h). */
+static BOOL (*s_user_mapper)(const char *rest, WCHAR *out, DWORD n);
+
+void xbox_path_set_user_mapper(BOOL (*mapper)(const char *rest, WCHAR *out, DWORD n))
+{
+    s_user_mapper = mapper;
+}
+
+void xbox_path_set_hdd_dir(const char *dir)
+{
+    s_hdd_dir[0] = 0;
+    if (dir && *dir) {
+        MultiByteToWideChar(CP_UTF8, 0, dir, -1, s_hdd_dir, MAX_PATH);
+        SHCreateDirectoryExW(NULL, s_hdd_dir, NULL);
+    }
+}
+
 /* Mod overlays: folders laid over the game folder (the disc). A game file
  * found in one of them is read from there instead; the last one added wins.
  * The game folder itself is never written. */
@@ -406,6 +433,19 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
     if (!s_initialized)
         xbox_path_init(NULL, NULL);
 
+    /* A title's own U:\ files: checked before the symbolic links, as the
+     * title's XAPI links U: to the hard disk's UDATA\<title id>. */
+    if (s_user_mapper) {
+        int u = match_prefix(xbox_path, "U:\\");
+        if (!u)
+            u = match_prefix(xbox_path, "\\??\\U:\\");
+        if (u && s_user_mapper(xbox_path + u, host_path_buf, buf_size)) {
+            fprintf(stderr, "  [PATH] %s -> %S\n", xbox_path, host_path_buf);
+            xbox_remember_host_path(host_path_buf);
+            return TRUE;
+        }
+    }
+
     {
         char linked[512];
         if (resolve_symlink(xbox_path, linked, sizeof(linked)))
@@ -413,7 +453,7 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
     }
 
     if (xbox_partition_device_path(xbox_path, host_path_buf, buf_size)) {
-        fprintf(stderr, "  [PATH] %s -> partition image\n", xbox_path);
+        fprintf(stderr, "  [PATH] %s -> device %S\n", xbox_path, host_path_buf);
         fflush(stderr);
         return TRUE;
     }
@@ -424,6 +464,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
             remainder = xbox_path + skip;
             base_dir  = s_rules[i].to_save ? s_save_dir : s_game_dir;
             sub_dir   = s_rules[i].sub_win;
+            if (s_hdd_dir[0] && !s_rules[i].to_save
+                    && !strcmp(s_rules[i].prefix, "\\Device\\Harddisk0\\Partition1\\"))
+                base_dir = s_hdd_dir;
             goto translate;
         }
     }
