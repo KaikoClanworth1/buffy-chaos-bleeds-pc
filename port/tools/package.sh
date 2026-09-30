@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # A release folder (and zip) with no game data: the player installs the game
 # from their own Xbox disc image with the launcher.
-#   bash port/tools/package.sh   ->  dist/Buffy Chaos Bleeds PC/ and dist/Buffy Chaos Bleeds PC.zip
+#   bash port/tools/package.sh   ->  dist/Buffy Chaos Bleeds PC/ and dist/Buffy-Chaos-Bleeds-PC-v<version>.zip
+# (the version is BUFFY_VERSION in port/CMakeLists.txt; the launcher's updater
+# takes the .zip of the newest GitHub release, so upload the zip as it is)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BIN="$ROOT/port/build/Release"
 OUT="$ROOT/dist/Buffy Chaos Bleeds PC"
+VER="$(sed -n 's/^set(BUFFY_VERSION "\(.*\)")/\1/p' "$ROOT/port/CMakeLists.txt")"
+ZIP="Buffy-Chaos-Bleeds-PC-v$VER.zip"
 rm -rf "$OUT"
 mkdir -p "$OUT/ShaderCache"
 cp -f "$BIN/Buffy Launcher.exe" "$BIN/buffy_chaos_bleeds.exe" "$OUT/"

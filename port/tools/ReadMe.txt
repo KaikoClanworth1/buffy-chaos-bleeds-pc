@@ -7,7 +7,11 @@ Start with "Buffy Launcher.exe":
             there (about 4 GB). The disc image is only read. The movies are
             converted for PC playback with FFmpeg; if it is not on the PC, the
             launcher offers to download it (or the game simply skips movies).
-  Play      Starts the game.
+  Play      Starts the game. Its Updates box checks GitHub for a newer
+            release when the launcher starts (untick to stop that) and
+            updates in place: the programs, shaders and the mods that come
+            with the release are replaced; saved games, settings and your
+            own mods are kept.
   Settings  Fullscreen or windowed, resolution (1080p and other widescreen
             sizes, or the original 4:3), VSync, skipping the intro movies,
             how widescreen is framed (by default the original side-to-side
@@ -59,7 +63,11 @@ selector, at a steady 60 fps (set BUFFY_UNCAPPED=1 to remove the cap).
 New Game works: the first level (Magic Box) loads and is playable, with
 cutscenes, combat and saving, at a steady 60 fps.
 PC options (in the game's own menus):
-  Options page:  Resolution  - Left/Right picks the size the game is drawn
+  Options page:  PC Settings - opens a page with the PC options below, plus
+                               Fullscreen, FPS Limit (60 or 30), Show FPS
+                               (a counter) and Debug Overlay (frame rate,
+                               frame times, renderer, resolution, GPU).
+                 Resolution  - Left/Right picks the size the game is drawn
                                at: 1920x1080 (default), 2560x1440, 3840x2160
                                or 1280x720 are widescreen (16:9); 640x480,
                                1280x960, 1920x1440 and 2560x1920 are the
@@ -81,3 +89,13 @@ If the game closes unexpectedly, buffy_log.txt beside the exe records why
 (the run before that is kept as buffy_log_previous.txt); if it freezes for 15
 seconds, where it is stuck goes into the log too. Frame rate is shown in the window title.
 Closing the window quits the game.
+
+Steam Deck and Linux (experimental, untested so far): run the launcher
+through Proton. In Steam, "Add a Non-Steam Game", choose Buffy Launcher.exe
+(file type: All Files), and in its Properties > Compatibility force Proton
+Experimental. Your Linux files are on drive Z: in the file dialogs. Add
+buffy_chaos_bleeds.exe from the game folder the same way to start straight
+into the game in Game Mode; on a Deck the first run is fullscreen at 720p.
+Updates and the FFmpeg download work under Proton too. If something goes
+wrong, please report it with buffy_log.txt (its first lines say what the game
+ran on).

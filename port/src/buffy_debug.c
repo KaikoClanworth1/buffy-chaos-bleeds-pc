@@ -71,6 +71,11 @@ static void write_report(const wchar_t *dir, const char *trigger)
                 fget(it + 0xAC), fget(it + 0xB0), fget(it + 0xB4), fget(it + 0xBC), MEM32(it + 0x10));
     }
 
+    {
+        const char *buffy_platform_text(void);
+        fprintf(f, "\n== System\n%s\n", buffy_platform_text());
+    }
+
     fprintf(f, "\n== Settings\n");
     fprintf(f, "resolution %dx%d%s, vsync %s, %s, widescreen view %s, invert camera x %s\n",
             buffy_settings_res_width(), buffy_settings_res_height(),

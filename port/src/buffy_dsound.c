@@ -309,10 +309,10 @@ static void mix(int16_t *out, int frames)
                 fwrite(hdr, 4, 11, wav);
             }
         }
-        if (wav && wav_bytes < MIX_RATE * 4 * 60) {
+        if (wav && wav_bytes < MIX_RATE * 4 * 200) {
             fwrite(out, 4, (size_t)frames, wav);
             wav_bytes += (uint32_t)frames * 4;
-            if (wav_bytes >= MIX_RATE * 4 * 60) {
+            if (wav_bytes >= MIX_RATE * 4 * 200) {
                 uint32_t v = wav_bytes + 36;
                 fseek(wav, 4, SEEK_SET); fwrite(&v, 4, 1, wav);
                 fseek(wav, 40, SEEK_SET); fwrite(&wav_bytes, 4, 1, wav);

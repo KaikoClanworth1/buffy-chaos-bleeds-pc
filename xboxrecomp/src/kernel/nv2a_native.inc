@@ -925,6 +925,436 @@ static ID3D11Buffer *ncb_write(ID3D11Buffer **buf, const void *data, UINT bytes)
     return *buf;
 }
 
+/* ── frame interpolation ──────────────────────────────────────────────────
+ *
+ * The game's logic runs 60 steps a second; above that the display gets a
+ * frame in between each pair: every draw into the main picture is recorded
+ * as it happens (its pipeline state, the slices of the shared vertex/index
+ * rings it used -- copied, the rings wrap -- and its constants), and at the
+ * present the frame is drawn again into a picture of its own with each
+ * draw's vertex-shader constants (its matrices, bones included) halfway
+ * between the previous frame's matching draw and this one's. A draw matches
+ * by its programs, vertex and index data and count, in order; one without a
+ * match, or whose constants jumped (a camera cut, a teleport), is drawn as it
+ * is. Draws into other targets (the reflection, shadows) are not replayed:
+ * the replay samples what they hold. */
+typedef struct {
+    uint8_t kind;                  /* 0 a draw, 1 a clear */
+    uint8_t has_dsv, instanced;
+    /* the match key */
+    uint32_t key_va, key_idx, key_n, key_prim;
+    void *key_vs, *key_ps;
+    /* the pipeline */
+    ID3D11InputLayout *il;
+    ID3D11Buffer *vb[4];
+    UINT stride[4], offs[4];
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11ShaderResourceView *srv[8];
+    ID3D11SamplerState *smp[4];
+    ID3D11BlendState *bs;
+    float bf[4];
+    UINT bmask;
+    ID3D11DepthStencilState *dss;
+    UINT sref;
+    ID3D11RasterizerState *rs;
+    D3D11_VIEWPORT vp;
+    UINT nidx, ib_first;
+    INT base;
+    uint32_t k_at;                 /* into the frame's constants */
+    /* a clear */
+    UINT cflags;
+    float ccol[4], cz;
+    UINT8 cs;
+} NRec;
+
+#define NREC_KFLOATS (VS_CONSTS * 4)
+#define NREC_OK(x) (isfinite(x) && fabsf(x) < 1e10f)   /* (unused constants hold garbage) */
+#define NREC_PFLOATS 128
+#define NREC_VB_VERTS (256u * 1024u)       /* GpuIn each (256 bytes): 64 MB */
+#define NREC_IB_IDX   (4u * 1024u * 1024u)
+
+typedef struct {
+    NRec *r;
+    int n, cap;
+    float *k;                       /* NREC_KFLOATS + NREC_PFLOATS a draw */
+    int kn, kcap;
+} NFrame;
+
+static NFrame s_ncur, s_nprev;
+static int s_interp_on;
+static ID3D11RenderTargetView *s_interp_main;
+static const float *s_rec_k;        /* this draw's vertex constants (the k[] draw_one uploads) */
+static ID3D11Buffer *s_rvb, *s_rib, *s_icb_vs, *s_icb_ps;
+static uint32_t s_rvb_pos, s_rib_pos;
+static int s_rec_full;
+static ID3D11Texture2D *s_itex, *s_iztex;
+static ID3D11RenderTargetView *s_irtv;
+static ID3D11DepthStencilView *s_idsv;
+static ID3D11ShaderResourceView *s_isrv;
+static UINT s_iw, s_ih;
+static DXGI_FORMAT s_ifmt;
+
+/* The port: interpolation on or off, and this frame's main picture. */
+void nv2a_native_interp_setup(int on, ID3D11RenderTargetView *main_rtv)
+{
+    s_interp_on = on;
+    s_interp_main = main_rtv;
+}
+
+static NRec *nrec_new(NFrame *f)
+{
+    if (f->n == f->cap) {
+        int c = f->cap ? f->cap * 2 : 1024;
+        NRec *r = (NRec *)realloc(f->r, (size_t)c * sizeof(NRec));
+        if (!r)
+            return NULL;
+        f->r = r;
+        f->cap = c;
+    }
+    memset(&f->r[f->n], 0, sizeof(NRec));
+    return &f->r[f->n++];
+}
+
+static float *nrec_consts(NFrame *f, uint32_t *at)
+{
+    int need = NREC_KFLOATS + NREC_PFLOATS;
+    if (f->kn + need > f->kcap) {
+        int c = f->kcap ? f->kcap * 2 : need * 1024;
+        float *k;
+        while (c < f->kn + need)
+            c *= 2;
+        if (!(k = (float *)realloc(f->k, (size_t)c * sizeof(float))))
+            return NULL;
+        f->k = k;
+        f->kcap = c;
+    }
+    *at = (uint32_t)f->kn;
+    f->kn += need;
+    return f->k + *at;
+}
+
+static int nrec_buffers(void)
+{
+    D3D11_BUFFER_DESC bd;
+    if (s_rvb && s_rib)
+        return 1;
+    memset(&bd, 0, sizeof bd);
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    bd.ByteWidth = NREC_VB_VERTS * (UINT)sizeof(GpuIn);
+    if (!s_rvb && FAILED(ID3D11Device_CreateBuffer(s_dev, &bd, NULL, &s_rvb)))
+        return 0;
+    bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    bd.ByteWidth = NREC_IB_IDX * 4;
+    if (!s_rib && FAILED(ID3D11Device_CreateBuffer(s_dev, &bd, NULL, &s_rib)))
+        return 0;
+    return 1;
+}
+
+/* From draw_one, just before its draw: record it if it goes to the main picture. */
+static void nrec_draw(const NativeDraw *d, ID3D11RenderTargetView *rtv, ID3D11DepthStencilView *dsv, const float *pcb,
+                      int gpu_vb, UINT vb_first, UINT nv, UINT ib_first, UINT nidx, D3D11_PRIMITIVE_TOPOLOGY topo)
+{
+    NRec *r;
+    float *k;
+    uint32_t at;
+    int i;
+    D3D11_BOX box;
+    UINT nvp = 1;
+    if (!s_interp_on || rtv != s_interp_main || s_rec_full || !s_rec_k || !nrec_buffers())
+        return;
+    if ((!gpu_vb && s_rvb_pos + nv > NREC_VB_VERTS) || s_rib_pos + nidx > NREC_IB_IDX) {
+        s_rec_full = 1;                               /* (a frame too big: shown without its in-between) */
+        return;
+    }
+    if (!(r = nrec_new(&s_ncur)) || !(k = nrec_consts(&s_ncur, &at))) {
+        s_rec_full = 1;
+        return;
+    }
+    r->kind = 0;
+    r->key_va = d->attr[0].va;
+    r->key_idx = d->index_va;
+    r->key_n = d->count;
+    r->key_prim = d->prim;
+    ID3D11DeviceContext_IAGetInputLayout(s_ctx, &r->il);
+    ID3D11DeviceContext_IAGetVertexBuffers(s_ctx, 0, 4, r->vb, r->stride, r->offs);
+    r->topo = topo;
+    ID3D11DeviceContext_VSGetShader(s_ctx, &r->vs, NULL, NULL);
+    ID3D11DeviceContext_PSGetShader(s_ctx, &r->ps, NULL, NULL);
+    r->key_vs = r->vs;
+    r->key_ps = r->ps;
+    ID3D11DeviceContext_PSGetShaderResources(s_ctx, 0, 8, r->srv);
+    ID3D11DeviceContext_PSGetSamplers(s_ctx, 0, 4, r->smp);
+    ID3D11DeviceContext_OMGetBlendState(s_ctx, &r->bs, r->bf, &r->bmask);
+    ID3D11DeviceContext_OMGetDepthStencilState(s_ctx, &r->dss, &r->sref);
+    ID3D11DeviceContext_RSGetState(s_ctx, &r->rs);
+    ID3D11DeviceContext_RSGetViewports(s_ctx, &nvp, &r->vp);
+    r->has_dsv = dsv != NULL;
+    r->nidx = nidx;
+    r->instanced = gpu_vb;
+    /* the ring slices, copied (the rings wrap within a frame) */
+    if (!gpu_vb) {
+        box.left = vb_first * (UINT)sizeof(GpuIn);
+        box.right = (vb_first + nv) * (UINT)sizeof(GpuIn);
+        box.top = 0; box.bottom = 1; box.front = 0; box.back = 1;
+        ID3D11DeviceContext_CopySubresourceRegion(s_ctx, (ID3D11Resource *)s_rvb, 0, s_rvb_pos * (UINT)sizeof(GpuIn), 0, 0,
+                                                  (ID3D11Resource *)s_vs_vb, 0, &box);
+        if (r->vb[0])
+            ID3D11Buffer_Release(r->vb[0]);
+        r->vb[0] = s_rvb;
+        ID3D11Buffer_AddRef(s_rvb);
+        r->offs[0] = 0;
+        r->base = (INT)s_rvb_pos;
+        s_rvb_pos += nv;
+    }
+    box.left = ib_first * 4;
+    box.right = (ib_first + nidx) * 4;
+    box.top = 0; box.bottom = 1; box.front = 0; box.back = 1;
+    ID3D11DeviceContext_CopySubresourceRegion(s_ctx, (ID3D11Resource *)s_rib, 0, s_rib_pos * 4, 0, 0, (ID3D11Resource *)s_ib, 0, &box);
+    r->ib_first = s_rib_pos;
+    s_rib_pos += nidx;
+    memcpy(k, s_rec_k, NREC_KFLOATS * sizeof(float));
+    memcpy(k + NREC_KFLOATS, pcb, NREC_PFLOATS * sizeof(float));
+    r->k_at = at;
+    (void)i;
+}
+
+/* The port's clears of the main picture. */
+void nv2a_native_interp_clear(ID3D11RenderTargetView *rtv, UINT flags, const float c[4], float z, UINT8 stencil)
+{
+    NRec *r;
+    if (!s_interp_on || rtv != s_interp_main || s_rec_full || !(r = nrec_new(&s_ncur)))
+        return;
+    r->kind = 1;
+    r->cflags = flags;
+    memcpy(r->ccol, c, sizeof r->ccol);
+    r->cz = z;
+    r->cs = stencil;
+}
+
+static void nrec_release(NFrame *f)
+{
+    int i, j;
+    for (i = 0; i < f->n; i++) {
+        NRec *r = &f->r[i];
+        if (r->kind)
+            continue;
+        if (r->il) ID3D11InputLayout_Release(r->il);
+        for (j = 0; j < 4; j++) if (r->vb[j]) ID3D11Buffer_Release(r->vb[j]);
+        if (r->vs) ID3D11VertexShader_Release(r->vs);
+        if (r->ps) ID3D11PixelShader_Release(r->ps);
+        for (j = 0; j < 8; j++) if (r->srv[j]) ID3D11ShaderResourceView_Release(r->srv[j]);
+        for (j = 0; j < 4; j++) if (r->smp[j]) ID3D11SamplerState_Release(r->smp[j]);
+        if (r->bs) ID3D11BlendState_Release(r->bs);
+        if (r->dss) ID3D11DepthStencilState_Release(r->dss);
+        if (r->rs) ID3D11RasterizerState_Release(r->rs);
+    }
+}
+
+/* After the present: this frame becomes the previous one (keys and constants). */
+void nv2a_native_interp_frame_end(void)
+{
+    NFrame t;
+    nrec_release(&s_nprev);
+    /* the previous frame keeps only what matching needs: its COM objects go */
+    t = s_nprev;
+    s_nprev = s_ncur;
+    s_ncur = t;
+    s_ncur.n = 0;
+    s_ncur.kn = 0;
+    {
+        int i;
+        for (i = 0; i < s_nprev.n; i++) {
+            NRec *r = &s_nprev.r[i];
+            if (r->kind)
+                continue;
+            /* (the keys are compared as values from here on) */
+            if (r->il) { ID3D11InputLayout_Release(r->il); r->il = NULL; }
+            { int j; for (j = 0; j < 4; j++) if (r->vb[j]) { ID3D11Buffer_Release(r->vb[j]); r->vb[j] = NULL; } }
+            if (r->vs) { ID3D11VertexShader_Release(r->vs); r->vs = NULL; }
+            if (r->ps) { ID3D11PixelShader_Release(r->ps); r->ps = NULL; }
+            { int j; for (j = 0; j < 8; j++) if (r->srv[j]) { ID3D11ShaderResourceView_Release(r->srv[j]); r->srv[j] = NULL; } }
+            { int j; for (j = 0; j < 4; j++) if (r->smp[j]) { ID3D11SamplerState_Release(r->smp[j]); r->smp[j] = NULL; } }
+            if (r->bs) { ID3D11BlendState_Release(r->bs); r->bs = NULL; }
+            if (r->dss) { ID3D11DepthStencilState_Release(r->dss); r->dss = NULL; }
+            if (r->rs) { ID3D11RasterizerState_Release(r->rs); r->rs = NULL; }
+        }
+    }
+    s_rvb_pos = 0;
+    s_rib_pos = 0;
+    s_rec_full = 0;
+}
+
+static int interp_targets(ID3D11Texture2D *like)
+{
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D_GetDesc(like, &td);
+    if (s_itex && s_iw == td.Width && s_ih == td.Height && s_ifmt == td.Format)
+        return 1;
+    if (s_irtv) { ID3D11RenderTargetView_Release(s_irtv); s_irtv = NULL; }
+    if (s_isrv) { ID3D11ShaderResourceView_Release(s_isrv); s_isrv = NULL; }
+    if (s_idsv) { ID3D11DepthStencilView_Release(s_idsv); s_idsv = NULL; }
+    if (s_itex) { ID3D11Texture2D_Release(s_itex); s_itex = NULL; }
+    if (s_iztex) { ID3D11Texture2D_Release(s_iztex); s_iztex = NULL; }
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.SampleDesc.Count = 1;
+    td.SampleDesc.Quality = 0;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    td.CPUAccessFlags = 0;
+    td.MiscFlags = 0;
+    if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_itex)))
+        return 0;
+    ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)s_itex, NULL, &s_irtv);
+    ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_itex, NULL, &s_isrv);
+    td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_iztex)))
+        ID3D11Device_CreateDepthStencilView(s_dev, (ID3D11Resource *)s_iztex, NULL, &s_idsv);
+    s_iw = td.Width;
+    s_ih = td.Height;
+    s_ifmt = td.Format;
+    return s_irtv && s_isrv;
+}
+
+/* key equality */
+static int nrec_same(const NRec *a, const NRec *b)
+{
+    return a->kind == 0 && b->kind == 0 && a->key_va == b->key_va && a->key_idx == b->key_idx && a->key_n == b->key_n
+           && a->key_prim == b->key_prim && a->key_vs == b->key_vs && a->key_ps == b->key_ps;
+}
+
+/* The frame in between (t: 0 the previous frame, 1 this one), drawn into a
+ * picture of the main one's size; 0 when there is nothing to draw. */
+int nv2a_native_interp_render(float t, ID3D11Texture2D *main_tex, ID3D11Texture2D **out_tex, ID3D11ShaderResourceView **out_srv)
+{
+    int i, blended = 0, drawn = 0, cuts = 0, *used;
+    float *kb;
+    if (!s_interp_on || s_rec_full || !s_ncur.n || !s_nprev.n || !main_tex || !interp_targets(main_tex))
+        return 0;
+    if (!(kb = (float *)malloc((NREC_KFLOATS) * sizeof(float))))
+        return 0;
+    if (!(used = (int *)calloc((size_t)s_nprev.n, sizeof(int)))) {
+        free(kb);
+        return 0;
+    }
+    if (!ncb_write(&s_icb_vs, kb, NREC_KFLOATS * sizeof(float)) || !ncb_write(&s_icb_ps, kb, NREC_PFLOATS * sizeof(float))) {
+        free(kb);
+        free(used);
+        return 0;
+    }
+    {
+        /* the picture starts as this frame's does (its first clear follows) */
+        float black[4] = { 0, 0, 0, 1 };
+        ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_irtv, black);
+        if (s_idsv)
+            ID3D11DeviceContext_ClearDepthStencilView(s_ctx, s_idsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    }
+    {
+        int pj = 0;                                      /* (matches are searched forward from the last) */
+        for (i = 0; i < s_ncur.n; i++) {
+            NRec *r = &s_ncur.r[i];
+            const float *kc, *use;
+            int j, m = -1;
+            if (r->kind == 1) {
+                if (r->cflags & 0xF0)
+                    ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_irtv, r->ccol);
+                if ((r->cflags & 3) && s_idsv)
+                    ID3D11DeviceContext_ClearDepthStencilView(s_ctx, s_idsv,
+                        ((r->cflags & 1) ? D3D11_CLEAR_DEPTH : 0) | ((r->cflags & 2) ? D3D11_CLEAR_STENCIL : 0), r->cz, r->cs);
+                continue;
+            }
+            kc = s_ncur.k + r->k_at;
+            use = kc;
+            for (j = pj; j < s_nprev.n; j++)
+                if (!used[j] && nrec_same(r, &s_nprev.r[j])) { m = j; break; }
+            if (m < 0)
+                for (j = 0; j < pj && j < s_nprev.n; j++)
+                    if (!used[j] && nrec_same(r, &s_nprev.r[j])) { m = j; break; }
+            if (m >= 0) {
+                const float *kp = s_nprev.k + s_nprev.r[m].k_at;
+                double diff = 0, mag = 0;
+                used[m] = 1;
+                pj = m + 1;
+                for (j = 0; j < NREC_KFLOATS; j++) {
+                    /* (unused slots can hold NaN or infinity: left out) */
+                    if (!NREC_OK(kc[j]) || !NREC_OK(kp[j]))
+                        continue;
+                    diff += fabs((double)kc[j] - (double)kp[j]);
+                    mag += fabs((double)kc[j]);
+                }
+                if (diff <= 0.25 * mag + 1e-6) {
+                    for (j = 0; j < NREC_KFLOATS; j++)
+                        kb[j] = NREC_OK(kc[j]) && NREC_OK(kp[j]) ? kp[j] + (kc[j] - kp[j]) * t : kc[j];
+                    use = kb;
+                    blended++;
+                } else {
+                    cuts++;
+                    if (nenv("BUFFY_INTERP_LOG")) {
+                        static int shown;
+                        if (shown++ < 40) {
+                            int worst = 0;
+                            double wd = 0;
+                            for (j = 0; j < NREC_KFLOATS; j++)
+                                if (fabs((double)kc[j] - (double)kp[j]) > wd) { wd = fabs((double)kc[j] - (double)kp[j]); worst = j; }
+                            fprintf(stderr, "[INTERP] jump: draw %d va %08X n %u ratio %.2f, most at c%d.%d %g -> %g\n", i, r->key_va,
+                                    r->key_n, diff / (mag + 1e-9), worst / 4, worst % 4, kp[worst], kc[worst]);
+                        }
+                    }
+                }
+            }
+            ncb_write(&s_icb_vs, use, NREC_KFLOATS * sizeof(float));
+            ncb_write(&s_icb_ps, kc + NREC_KFLOATS, NREC_PFLOATS * sizeof(float));
+            ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s_irtv, r->has_dsv ? s_idsv : NULL);
+            ID3D11DeviceContext_RSSetViewports(s_ctx, 1, &r->vp);
+            ID3D11DeviceContext_RSSetState(s_ctx, r->rs);
+            ID3D11DeviceContext_OMSetBlendState(s_ctx, r->bs, r->bf, r->bmask);
+            ID3D11DeviceContext_OMSetDepthStencilState(s_ctx, r->dss, r->sref);
+            ID3D11DeviceContext_IASetInputLayout(s_ctx, r->il);
+            ID3D11DeviceContext_IASetVertexBuffers(s_ctx, 0, 4, r->vb, r->stride, r->offs);
+            ID3D11DeviceContext_IASetIndexBuffer(s_ctx, s_rib, DXGI_FORMAT_R32_UINT, 0);
+            ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, r->topo);
+            ID3D11DeviceContext_VSSetShader(s_ctx, r->vs, NULL, 0);
+            ID3D11DeviceContext_VSSetConstantBuffers(s_ctx, 1, 1, &s_icb_vs);
+            ID3D11DeviceContext_PSSetShader(s_ctx, r->ps, NULL, 0);
+            ID3D11DeviceContext_PSSetConstantBuffers(s_ctx, 0, 1, &s_icb_ps);
+            ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 8, r->srv);
+            ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 4, r->smp);
+            if (r->instanced)
+                ID3D11DeviceContext_DrawIndexedInstanced(s_ctx, r->nidx, 1, r->ib_first, 0, 0);
+            else
+                ID3D11DeviceContext_DrawIndexed(s_ctx, r->nidx, r->ib_first, r->base);
+            drawn++;
+        }
+    }
+    {
+        ID3D11ShaderResourceView *none[8] = { 0 };
+        ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 8, none);
+        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
+    }
+    free(kb);
+    free(used);
+    if (nenv("BUFFY_INTERP_LOG")) {
+        static DWORD last;
+        static int frames;
+        frames++;
+        if (GetTickCount() - last > 2000) {
+            fprintf(stderr, "[INTERP] %d draws: %d blended, %d jumped (drawn as they are), %d unmatched; %.1f game frames a second\n",
+                    drawn, blended, cuts, drawn - blended - cuts, last ? frames * 1000.0 / (GetTickCount() - last) : 0.0);
+            last = GetTickCount();
+            frames = 0;
+        }
+    }
+    if (cuts > drawn / 2)
+        return 0;                                        /* a cut: no frame in between */
+    *out_tex = s_itex;
+    *out_srv = s_isrv;
+    return drawn > 0;
+}
+
 static int s_ntrace_gpu_vb;
 static uint32_t s_ntrace_px[2];
 /* non-stalling probes: the page pixel just before / after draw BUFFY_FLASHTRACE_AT, per frame */
@@ -1316,6 +1746,7 @@ static int nv2a_native_draw_one(const NativeDraw *d, ID3D11RenderTargetView *rtv
                             KEL(0x029C), *(const float *)&KEL(0x09C0), *(const float *)&KEL(0x09C4), KEL(0x02A4));
             }
         }
+        s_rec_k = &k[0][0];                          /* (for frame interpolation's record) */
         {
             static float last_k[VS_CONSTS][4];
             static int have;
@@ -1469,6 +1900,7 @@ static int nv2a_native_draw_one(const NativeDraw *d, ID3D11RenderTargetView *rtv
     }
     ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, 8, srv);
     ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 4, smp);
+    nrec_draw(d, rtv, dsv, cb, gpu_vb, vb_first, gpu_vb ? 0u : vmax - vmin + 1, ib_first, nidx, topo);
     if (gpu_vb)
         ID3D11DeviceContext_DrawIndexedInstanced(s_ctx, nidx, 1, ib_first, 0, 0);
     else

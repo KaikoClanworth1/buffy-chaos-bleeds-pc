@@ -502,6 +502,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     setvbuf(stderr, NULL, _IONBF, 0);
 
     printf("=== Buffy the Vampire Slayer: Chaos Bleeds - Static Recompilation ===\n");
+    {
+        const char *buffy_platform_text(void);
+        fprintf(stderr, "[PLATFORM] %s\n", buffy_platform_text());
+    }
     resolve_game_paths();
 
     /* Title defaults, overridable from the environment:

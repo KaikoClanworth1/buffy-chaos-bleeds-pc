@@ -123,6 +123,10 @@ static int           s_win2_w, s_win2_h;       /* outer size, as window 1's */
 static volatile LONG s_win2_hidden;
 static volatile LONG s_split_on;               /* split screen: window 1 shows both, side by side */
 #define WM_GPU_MAKE_WINDOW2 (WM_APP + 1)
+#define WM_GPU_MOUSECAP     (WM_APP + 2)
+/* Mouse look (buffy_input.c): the cursor hidden and kept in window 1 while
+ * the game wants the mouse; the wheel's notches counted for it. */
+static volatile LONG s_mouse_want, s_mouse_on, s_wheel;
 static volatile LONG s_flipq[64];
 static volatile LONG s_flipq_w, s_flipq_r;
 static volatile LONG s_frame_wide;            /* present this frame 16:9, not 4:3 */
@@ -224,6 +228,40 @@ static LRESULT CALLBACK gpu_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         gpu_create_window2();
         return 0;
     }
+    if (h == s_gpu_hwnd && (m == WM_GPU_MOUSECAP || (m == WM_ACTIVATE && s_mouse_want))) {
+        /* capture on / off (and again when the window comes back to the front) */
+        int on = s_mouse_want && (m == WM_GPU_MOUSECAP || LOWORD(w) != WA_INACTIVE) && GetForegroundWindow() == h;
+        if (on) {
+            RECT r;
+            POINT a = { 0, 0 }, b;
+            GetClientRect(h, &r);
+            b.x = r.right;
+            b.y = r.bottom;
+            ClientToScreen(h, &a);
+            ClientToScreen(h, &b);
+            SetRect(&r, a.x, a.y, b.x, b.y);
+            ClipCursor(&r);
+            if (!s_mouse_on)
+                while (ShowCursor(FALSE) >= 0)
+                    ;
+        } else {
+            ClipCursor(NULL);
+            if (s_mouse_on)
+                while (ShowCursor(TRUE) < 0)
+                    ;
+        }
+        InterlockedExchange(&s_mouse_on, on);
+        if (m == WM_GPU_MOUSECAP)
+            return 0;
+    }
+    if (m == WM_SETCURSOR && h == s_gpu_hwnd && s_mouse_on && LOWORD(l) == HTCLIENT) {
+        SetCursor(NULL);
+        return TRUE;
+    }
+    if (m == WM_MOUSEWHEEL) {
+        InterlockedExchangeAdd(&s_wheel, (short)HIWORD(w));
+        return 0;
+    }
     if (m == WM_SIZE) {
         InterlockedExchange(h == s_gpu_hwnd2 && h ? &s_resize2_pending : &s_resize_pending, 1);
         return 0;
@@ -241,6 +279,35 @@ static LRESULT CALLBACK gpu_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     if (m == WM_SYSCHAR && w == VK_RETURN)
         return 0;                                   /* no beep on Alt+Enter */
     return DefWindowProcA(h, m, w, l);
+}
+
+/* Mouse look: capture the mouse in window 1 (on) or let it go. Any thread. */
+void nv2a_gpu_mouse_capture(int on)
+{
+    on = on != 0;
+    if (InterlockedExchange(&s_mouse_want, on) != on && s_gpu_hwnd)
+        PostMessageA(s_gpu_hwnd, WM_GPU_MOUSECAP, 0, 0);
+}
+
+/* Is the mouse captured now; window 1's centre in screen pixels. */
+int nv2a_gpu_mouse_captured(int *cx, int *cy)
+{
+    RECT r;
+    POINT c;
+    if (!s_mouse_on || !s_gpu_hwnd || !GetClientRect(s_gpu_hwnd, &r))
+        return 0;
+    c.x = (r.left + r.right) / 2;
+    c.y = (r.top + r.bottom) / 2;
+    ClientToScreen(s_gpu_hwnd, &c);
+    *cx = c.x;
+    *cy = c.y;
+    return 1;
+}
+
+/* The wheel's movement since the last call (120 a notch, up positive). */
+int nv2a_gpu_take_wheel(void)
+{
+    return (int)InterlockedExchange(&s_wheel, 0);
 }
 
 /* Render size (the game's 640x480 drawn at width x height), vsync on/off,
@@ -785,6 +852,8 @@ static void gpu_screenshot_split(void)
     s_split_shot = -1;
 }
 
+static int s_interp_shot = -1;             /* (BUFFY_SHOTS_INTERP: the next in-between frame's index) */
+
 static void gpu_screenshot(GpuSurface *s, int window2)
 {
     static DWORD last;
@@ -815,6 +884,7 @@ static void gpu_screenshot(GpuSurface *s, int window2)
             return;
         last = GetTickCount();
         idx = n++;
+        s_interp_shot = idx;
         if (s_swap2 || s_split_on)
             want_p2 = idx;
     }
@@ -1255,6 +1325,9 @@ static void gpu_snapshot(GpuSurface *s, int window2);
  * but draws, clears and flips nothing; the native side owns the device context
  * (on the game thread) and shows its frames through gpu_show below. */
 static void gpu_show(GpuSurface *shown);
+static void gpu_overlay_draw(IDXGISwapChain *swap);   /* nv2a_overlay.inc */
+static volatile DWORD s_toast_until;             /* nv2a_overlay.inc: a message's end */
+static void gpu_overlay_tick(void);
 
 /* Flip: show the surface at this physical offset. */
 static void gpu_present(uint32_t offset)
@@ -1301,18 +1374,24 @@ static void gpu_show(GpuSurface *shown)
                 if (target == 1) {
                     gpu_screenshot(shown, 1);          /* marks the composed shot below */
                     gpu_screenshot_split();
+                    gpu_overlay_draw(s_swap);
                     IDXGISwapChain_Present(s_swap, s_opt_vsync ? 1 : 0, 0);
                 }
             } else if (target != 1 || !s_swap2 || s_win2_hidden) {
                 gpu_blit_to(shown, s_swap, &s_resize_pending);
                 gpu_dark_sample(shown, s_swap);
+                gpu_overlay_draw(s_swap);
                 IDXGISwapChain_Present(s_swap, s_opt_vsync ? 1 : 0, 0);
             }
             if (s_swap2 && !s_win2_hidden && target != 0 && !s_split_on) {
                 gpu_blit_to(shown, s_swap2, &s_resize2_pending);
+                if ((int)(s_toast_until - GetTickCount()) > 0)
+                    gpu_overlay_draw(s_swap2);          /* (a message: in player 2's window too) */
                 IDXGISwapChain_Present(s_swap2, 0, 0);   /* one vsync wait a frame: window 1's;
                                                         * the compositor keeps this tear-free */
             }
+            if (target != 1)
+                gpu_overlay_tick();                /* window 1's frames: the overlay's frame rate */
             gpu_screenshot(shown, target == 1);
             gpu_snapshot(shown, target == 1);
             gpu_apply_display();          /* may drop every surface, s_surf[i] too */
@@ -1408,6 +1487,33 @@ void nv2a_gpu_native_present(ID3D11Texture2D *tex, ID3D11ShaderResourceView *srv
     gpu_show(&s);
 }
 
+/* Frame interpolation's frame in between: window 1 only, without the flip
+ * queue, the pacing or the screenshots of a real frame. */
+void nv2a_gpu_native_present_extra(ID3D11Texture2D *tex, ID3D11ShaderResourceView *srv,
+                                   uint32_t w, uint32_t h, uint32_t pw, uint32_t ph)
+{
+    static GpuSurface s;
+    if (s_gpu_state != 1 || !s_swap)
+        return;
+    memset(&s, 0, sizeof s);
+    s.tex = tex; s.srv = srv; s.w = w; s.h = h; s.pw = pw; s.ph = ph; s.used = 1;
+    gpu_blit_to(&s, s_swap, &s_resize_pending);
+    gpu_overlay_draw(s_swap);
+    IDXGISwapChain_Present(s_swap, s_opt_vsync ? 1 : 0, 0);
+    if (getenv("BUFFY_SHOTS_INTERP") && getenv("BUFFY_SHOTS") && s_interp_shot >= 0) {
+        char path[MAX_PATH];
+        sprintf_s(path, sizeof path, "%s\\shot%03d_i.bmp", getenv("BUFFY_SHOTS"), s_interp_shot);
+        gpu_save_bmp(tex, pw, ph, path);
+        s_interp_shot = -1;
+    }
+}
+
+/* Is vsync on (the in-between frame's timing depends on it). */
+int nv2a_gpu_vsync(void)
+{
+    return (int)s_opt_vsync;
+}
+
 /* ── textures ──────────────────────────────────────────────────────────── */
 
 /* The texture registers the cache reads: the pushbuffer's, or the native
@@ -1440,6 +1546,7 @@ static uint32_t tx_level_bytes(uint32_t fmt, uint32_t block, uint32_t w, uint32_
 }
 
 #include "nv2a_texpack.inc"
+#include "nv2a_overlay.inc"
 
 /* A bug report's screenshot (see nv2a_gpu_request_snapshot). */
 static void gpu_snapshot(GpuSurface *s, int window2)
@@ -2312,5 +2419,6 @@ void nv2a_gpu_set_split(int on) { (void)on; }
 float nv2a_gpu_split_half_aspect(void) { return 8.0f / 9.0f; }
 void nv2a_gpu_show_second_window(int show) { (void)show; }
 void nv2a_gpu_queue_flip(int target) { (void)target; }
+void nv2a_gpu_set_overlay(int mode) { (void)mode; }
 static void gpu_draw_batch(void) {}
 #endif

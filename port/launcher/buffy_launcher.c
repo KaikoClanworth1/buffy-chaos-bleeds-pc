@@ -15,7 +15,7 @@
  *             port's program files copied beside them, and the movies
  *             converted for PC playback when FFmpeg is available.
  *
- * Command line (tests):  --capture <play|settings|mods|textures|install> <file.bmp>
+ * Command line (tests):  --capture <play|settings|controls|mods|textures|saves|advanced|install> <file.bmp>
  *                        --install <image> <folder>   (no window; exit code)
  *                        --icon <folder>              (the game exe's icon; exit code)
  */
@@ -35,9 +35,13 @@
 #include <shellapi.h>
 #include <urlmon.h>
 #include <uxtheme.h>
+#include <winhttp.h>
+#include <bcrypt.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <wchar.h>
+
+#include "unzip.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -45,10 +49,17 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "bcrypt.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' " \
                         "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-#define LAUNCHER_VERSION  L"1.3"
+#ifndef BUFFY_VERSION
+#define BUFFY_VERSION     "0.0.0"         /* from CMakeLists.txt */
+#endif
+#define WIDEN_(x)         L##x
+#define WIDEN(x)          WIDEN_(x)
+#define PORT_VERSION      WIDEN(BUFFY_VERSION)
 #define GAME_TITLE        L"Buffy the Vampire Slayer: Chaos Bleeds"
 #define GAME_EXE          L"buffy_chaos_bleeds.exe"
 #define TITLE_ID          0x56550005u   /* from the disc's default.xbe certificate */
@@ -56,20 +67,29 @@
 
 /* ── state ─────────────────────────────────────────────────────────────── */
 
-enum { TAB_PLAY, TAB_SETTINGS, TAB_MODS, TAB_TEXTURES, TAB_INSTALL, TAB_COUNT };
+enum { TAB_PLAY, TAB_SETTINGS, TAB_CONTROLS, TAB_MODS, TAB_TEXTURES, TAB_SAVES, TAB_ADVANCED, TAB_INSTALL, TAB_COUNT };
 
 enum {
     ID_TAB = 100,
     /* play */
     ID_GAMEDIR, ID_GAMEDIR_CHANGE, ID_PLAY, ID_CLOSE_ON_PLAY, ID_PLAY_STATUS, ID_VERSION, ID_REPORTS_OPEN,
+    ID_UPD_STATUS, ID_UPD_CHECK, ID_UPD_APPLY, ID_UPD_NOTES, ID_UPD_AUTO,
     /* settings */
-    ID_WINDOWED, ID_FULLSCREEN, ID_RESOLUTION, ID_VSYNC, ID_SKIP_INTRO, ID_WS_SAFE, ID_INVERT_X, ID_REPORT_BTN, ID_RENDERER, ID_DEFAULTS, ID_SAVE,
+    ID_WINDOWED, ID_FULLSCREEN, ID_RESOLUTION, ID_VSYNC, ID_SKIP_INTRO, ID_WS_SAFE, ID_INVERT_X, ID_REPORT_BTN, ID_RENDERER, ID_FPS_LIMIT, ID_SHOW_FPS, ID_OVERLAY, ID_INTERP, ID_PRELOAD, ID_DEFAULTS, ID_SAVE,
     ID_SETTINGS_STATUS,
     /* mods */
     ID_MODLIST, ID_MOD_DESC, ID_MOD_UP, ID_MOD_DOWN, ID_MOD_OPEN, ID_MOD_REFRESH, ID_MOD_APPLY,
     ID_MOD_STATUS,
     /* textures */
     ID_TEX_LOAD, ID_TEX_PREFETCH, ID_TEX_DUMP, ID_TEX_OPEN_LOAD, ID_TEX_OPEN_DUMP, ID_TEX_REFRESH, ID_TEX_STATUS,
+    /* controls */
+    ID_CTL_LIST, ID_CTL_CHANGE, ID_CTL_SECOND, ID_CTL_CLEAR, ID_CTL_RESET, ID_CTL_MOUSELOOK, ID_CTL_INVERTY, ID_CTL_SENS,
+    ID_CTL_SENS_LABEL, ID_CTL_SAVE, ID_CTL_STATUS,
+    /* saves */
+    ID_SAV_LIST, ID_SAV_BACKUP, ID_SAV_RESTORE, ID_SAV_OPEN, ID_SAV_OPEN_BACKUPS, ID_SAV_STATUS,
+    /* advanced: model tools */
+    ID_MDL_PICK, ID_MDL_HASH, ID_MDL_EXPORT, ID_MDL_OPEN, ID_MDL_FILE, ID_MDL_BROWSE, ID_MDL_BASE, ID_MDL_NAME,
+    ID_MDL_CREATE, ID_MDL_STATUS,
     /* install */
     ID_IMAGE, ID_IMAGE_BROWSE, ID_TARGET, ID_TARGET_BROWSE, ID_MOVIES, ID_FFMPEG_STATUS,
     ID_FFMPEG_GET, ID_INSTALL, ID_PROGRESS, ID_INSTALL_STATUS,
@@ -78,6 +98,10 @@ enum {
 #define WM_APP_PROGRESS (WM_APP + 1)     /* wParam permille, lParam heap WCHAR* or 0 */
 #define WM_APP_DONE     (WM_APP + 2)     /* wParam 1 ok / 0 failed, lParam heap WCHAR* */
 #define WM_APP_GAMEEND  (WM_APP + 3)     /* wParam exit code */
+#define WM_APP_EXPORTEND (WM_APP + 4)    /* wParam exit code: the game's model export finished */
+#define WM_APP_UPDCHECK (WM_APP + 5)     /* lParam heap UpdateInfo* or 0: an update check finished */
+#define WM_APP_UPDPROG  (WM_APP + 6)     /* lParam heap WCHAR*: the update's progress */
+#define WM_APP_UPDDONE  (WM_APP + 7)     /* wParam 1 ok, lParam heap WCHAR* reason */
 
 static HINSTANCE s_inst;
 static HWND      s_wnd, s_tab;
@@ -140,6 +164,24 @@ static int mkdirs(const WCHAR *path)
         }
     }
     return CreateDirectoryW(tmp, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+/* Wine or Proton (ntdll exports wine_get_version): Linux, the Steam Deck. */
+static int is_wine(void)
+{
+    static int wine = -1;
+    if (wine < 0) {
+        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+        wine = nt && GetProcAddress(nt, "wine_get_version") != NULL;
+    }
+    return wine;
+}
+
+/* A Steam Deck (Steam sets SteamDeck=1 for what it starts there). */
+static int on_steam_deck(void)
+{
+    WCHAR v[8];
+    return GetEnvironmentVariableW(L"SteamDeck", v, 8) == 1 && v[0] == L'1';
 }
 
 static WCHAR *wdup(const WCHAR *s)
@@ -210,6 +252,8 @@ static void save_launcher_ini(void)
     WritePrivateProfileStringW(L"Launcher", L"GameFolder", s_game_dir, s_launcher_ini);
     WritePrivateProfileStringW(L"Launcher", L"CloseOnPlay",
         IsDlgButtonChecked(s_wnd, ID_CLOSE_ON_PLAY) == BST_CHECKED ? L"1" : L"0", s_launcher_ini);
+    WritePrivateProfileStringW(L"Launcher", L"CheckUpdates",
+        IsDlgButtonChecked(s_wnd, ID_UPD_AUTO) == BST_CHECKED ? L"1" : L"0", s_launcher_ini);
 }
 
 /* ── icon: the game's own save-game image (128x128 DXT1 in an XPR0) ───── */
@@ -589,30 +633,62 @@ static int run_hidden(const WCHAR *exe, WCHAR *cmdline, const WCHAR *cwd)
     return (int)code;
 }
 
+/* Unpacks a zip into an existing folder: with the launcher's own reader
+ * (unzip.c; Wine / Proton has no tar.exe), else Windows' tar. 1 ok.
+ * (tests) BUFFY_NO_TAR=1: no tar, as under Proton. */
+static int unpack_zip(const WCHAR *zip, const WCHAR *to)
+{
+    WCHAR tar[MAX_PATH], cmd[MAX_PATH * 3];
+    if (unzip_file(zip, to))
+        return 1;
+    if (GetEnvironmentVariableW(L"BUFFY_NO_TAR", tar, MAX_PATH))
+        return 0;
+    GetSystemDirectoryW(tar, MAX_PATH);
+    wcscat_s(tar, MAX_PATH, L"\\tar.exe");
+    if (!file_exists(tar))
+        return 0;
+    swprintf_s(cmd, MAX_PATH * 3, L"\"%s\" -xf \"%s\" -C \"%s\"", tar, zip, to);
+    return run_hidden(tar, cmd, to) == 0;
+}
+
+static int http_get(const WCHAR *url, char **body, HANDLE file, uint64_t size_hint, WCHAR *err, int errn);
+static void (*s_http_progress)(int percent);    /* a download's progress (http_get), or NULL */
+
+static void ffmpeg_progress(int percent)
+{
+    post_progress(percent * 5, L"Downloading FFmpeg... %d%%", percent);
+}
+
 static DWORD WINAPI ffmpeg_download_thread(LPVOID unused)
 {
-    WCHAR tools[MAX_PATH], zip[MAX_PATH], tmp[MAX_PATH], cmd[MAX_PATH * 3], tar[MAX_PATH];
+    WCHAR tools[MAX_PATH], zip[MAX_PATH], tmp[MAX_PATH], cmd[MAX_PATH * 3], err[256];
     WIN32_FIND_DATAW fd;
-    HANDLE h;
-    HRESULT hr;
+    HANDLE h, f;
+    int ok;
     (void)unused;
     join(tools, s_launcher_dir, L"tools");
     mkdirs(tools);
     join(zip, tools, L"ffmpeg-download.zip");
     join(tmp, tools, L"ffmpeg-unpack");
     post_progress(0, L"Downloading FFmpeg (about 150 MB)...");
-    hr = URLDownloadToFileW(NULL, FFMPEG_URL, zip, 0, NULL);
-    if (FAILED(hr)) {
+    /* WinHTTP (as the updater): works the same under Wine / Proton */
+    f = CreateFileW(zip, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok = f != INVALID_HANDLE_VALUE;
+    if (ok) {
+        s_http_progress = ffmpeg_progress;
+        ok = http_get(FFMPEG_URL, NULL, f, 0, err, 256);
+        s_http_progress = NULL;
+        CloseHandle(f);
+    }
+    if (!ok) {
+        DeleteFileW(zip);
         PostMessageW(s_wnd, WM_APP_DONE, 0, (LPARAM)wdup(L"FFmpeg could not be downloaded. Check the internet connection, "
                                                           L"or put ffmpeg.exe in the launcher's tools folder."));
         return 0;
     }
     post_progress(500, L"Unpacking FFmpeg...");
     mkdirs(tmp);
-    GetSystemDirectoryW(tar, MAX_PATH);
-    wcscat_s(tar, MAX_PATH, L"\\tar.exe");
-    swprintf_s(cmd, MAX_PATH * 3, L"\"%s\" -xf \"%s\" -C \"%s\"", tar, zip, tmp);
-    if (run_hidden(tar, cmd, tmp) != 0) {
+    if (!unpack_zip(zip, tmp)) {
         PostMessageW(s_wnd, WM_APP_DONE, 0, (LPARAM)wdup(L"The FFmpeg download could not be unpacked."));
         return 0;
     }
@@ -956,8 +1032,9 @@ static void settings_load(void)
     WCHAR p[MAX_PATH];
     int w, h, i, sel = 0;
     settings_path(p);
-    w = (int)GetPrivateProfileIntW(L"Display", L"Width", 1920, p);
-    h = (int)GetPrivateProfileIntW(L"Display", L"Height", 1080, p);
+    /* no settings yet on a Steam Deck: 720p (fullscreen is the default) */
+    w = (int)GetPrivateProfileIntW(L"Display", L"Width", on_steam_deck() ? 1280 : 1920, p);
+    h = (int)GetPrivateProfileIntW(L"Display", L"Height", on_steam_deck() ? 720 : 1080, p);
     for (i = 0; i < N_RES; i++)
         if (k_res[i].w == w && k_res[i].h == h)
             sel = i;
@@ -969,11 +1046,16 @@ static void settings_load(void)
     }
     CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN,
                      GetPrivateProfileIntW(L"Display", L"Fullscreen", 1, p) ? ID_FULLSCREEN : ID_WINDOWED);
+    SendMessageW(ctl(ID_FPS_LIMIT), CB_SETCURSEL, GetPrivateProfileIntW(L"Display", L"FpsLimit", 60, p) == 30 ? 1 : 0, 0);
+    CheckDlgButton(s_wnd, ID_SHOW_FPS, GetPrivateProfileIntW(L"Display", L"ShowFps", 0, p) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_OVERLAY, GetPrivateProfileIntW(L"Display", L"DebugOverlay", 0, p) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_INTERP, GetPrivateProfileIntW(L"Display", L"FrameInterpolation", 0, p) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_PRELOAD, GetPrivateProfileIntW(L"Game", L"PreloadData", 1, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_VSYNC, GetPrivateProfileIntW(L"Display", L"VSync", 1, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_SKIP_INTRO,
                    GetPrivateProfileIntW(L"Game", L"SkipIntroMovies", 0, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_WS_SAFE,
-                   GetPrivateProfileIntW(L"Display", L"WidescreenWide", 0, p) ? BST_UNCHECKED : BST_CHECKED);
+                   GetPrivateProfileIntW(L"Display", L"WidescreenWide", 1, p) ? BST_UNCHECKED : BST_CHECKED);
     CheckDlgButton(s_wnd, ID_REPORT_BTN,
                    GetPrivateProfileIntW(L"Debug", L"ReportButton", 1, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_INVERT_X,
@@ -1000,6 +1082,12 @@ static int settings_save(void)
     WritePrivateProfileStringW(L"Display", L"Renderer",
                                SendMessageW(ctl(ID_RENDERER), CB_GETCURSEL, 0, 0) == 1 ? L"emulated" : L"native", p);
     WritePrivateProfileStringW(L"Display", L"VSync", IsDlgButtonChecked(s_wnd, ID_VSYNC) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Display", L"FpsLimit",
+                               SendMessageW(ctl(ID_FPS_LIMIT), CB_GETCURSEL, 0, 0) == 1 ? L"30" : L"60", p);
+    WritePrivateProfileStringW(L"Display", L"ShowFps", IsDlgButtonChecked(s_wnd, ID_SHOW_FPS) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Display", L"DebugOverlay", IsDlgButtonChecked(s_wnd, ID_OVERLAY) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Display", L"FrameInterpolation", IsDlgButtonChecked(s_wnd, ID_INTERP) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Game", L"PreloadData", IsDlgButtonChecked(s_wnd, ID_PRELOAD) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"Fullscreen", IsDlgButtonChecked(s_wnd, ID_FULLSCREEN) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Game", L"SkipIntroMovies", IsDlgButtonChecked(s_wnd, ID_SKIP_INTRO) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"WidescreenWide", IsDlgButtonChecked(s_wnd, ID_WS_SAFE) ? L"0" : L"1", p);
@@ -1012,12 +1100,17 @@ static int settings_save(void)
 
 static void settings_defaults(void)
 {
-    SendMessageW(ctl(ID_RESOLUTION), CB_SETCURSEL, 0, 0);
+    SendMessageW(ctl(ID_RESOLUTION), CB_SETCURSEL, on_steam_deck() ? 3 : 0, 0);   /* 1080p; 720p on a Deck */
     SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, 0, 0);
+    SendMessageW(ctl(ID_FPS_LIMIT), CB_SETCURSEL, 0, 0);
+    CheckDlgButton(s_wnd, ID_SHOW_FPS, BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_OVERLAY, BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_INTERP, BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_PRELOAD, BST_CHECKED);
     CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN, ID_FULLSCREEN);
     CheckDlgButton(s_wnd, ID_VSYNC, BST_CHECKED);
     CheckDlgButton(s_wnd, ID_SKIP_INTRO, BST_UNCHECKED);
-    CheckDlgButton(s_wnd, ID_WS_SAFE, BST_CHECKED);
+    CheckDlgButton(s_wnd, ID_WS_SAFE, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_INVERT_X, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_REPORT_BTN, BST_CHECKED);
     s_settings_dirty = 1;
@@ -1310,6 +1403,8 @@ static void play(void)
     set_text(ID_PLAY_STATUS, L"The game is running.");
 }
 
+#include "launcher_update.inc"
+
 /* ── folder / file pickers ─────────────────────────────────────────────── */
 
 static int pick_folder(const WCHAR *title, WCHAR *out)
@@ -1483,6 +1578,578 @@ static void tex_open(const WCHAR *sub)
     ShellExecuteW(s_wnd, L"open", d, NULL, NULL, SW_SHOWNORMAL);
 }
 
+/* ── advanced: model tools ─────────────────────────────────────────────────
+ *
+ * Character mods can wear a model of their own. The tools here:
+ *   Export: the game is started in its export mode (BUFFY_EXPORT_MODEL=hash):
+ *           it loads the model file, writes it -- mesh, skeleton, skin
+ *           weights, textures -- as a .glb (glTF) to models\export, and quits.
+ *           Blender opens .glb files as they are (File > Import > glTF 2.0).
+ *   Create: a .glb made in Blender becomes a character mod: mods\character-
+ *           <name> with the file and a mod.ini ([Character] BaseCharacter,
+ *           ModelFile), ready to tick on the Mods tab. */
+
+typedef struct { const WCHAR *name; unsigned hash; } ModelPick;
+static const ModelPick k_models[] = {
+    { L"Buffy, Willow, Faith and Tara (p01_buff)", 0x01000003u },
+    { L"Xander (p03_xand)", 0x01000022u },
+    { L"Spike (p04_spik)", 0x01000012u },
+    { L"Sid (p05_sid)", 0x01000021u },
+    { L"Evil Giles - the Ripper boss (b02_gile)", 0x01000026u },
+    { L"Another model file (its hash below)", 0u },
+};
+#define N_MODELS ((int)(sizeof k_models / sizeof k_models[0]))
+static const WCHAR *k_bases[6] = { L"Buffy", L"Willow", L"Xander", L"Spike", L"Sid", L"Faith" };
+static HANDLE s_export_proc;
+
+static void models_dir(WCHAR *out, const WCHAR *sub)
+{
+    WCHAR root[MAX_PATH];
+    join(root, s_game_dir, L"models");
+    if (sub)
+        join(out, root, sub);
+    else
+        wcscpy_s(out, MAX_PATH, root);
+}
+
+/* ── Controls ──────────────────────────────────────────────────────────────
+ *
+ * Player 1's keys and mouse: [Keys] in buffy_settings.ini, an action = up to
+ * two key names (the game's buffy_input.c reads the same names), and
+ * [Controls] MouseLook / MouseSensitivity / MouseInvertY. */
+static const struct { const WCHAR *key, *label, *def; } k_ctl_actions[] = {
+    { L"MoveForward", L"Move forward", L"W" }, { L"MoveBack", L"Move back", L"S" },
+    { L"MoveLeft", L"Move left", L"A" }, { L"MoveRight", L"Move right", L"D" },
+    { L"X", L"Punch (X)", L"E, MouseLeft" }, { L"A", L"Kick / select (A)", L"Space" },
+    { L"Y", L"Action, pick up (Y)", L"Q, MouseRight" }, { L"B", L"Back (B)", L"Backspace, MouseMiddle" },
+    { L"Black", L"Black button", L"Z" }, { L"White", L"White button", L"C" },
+    { L"LeftTrigger", L"Left trigger", L"LShift" }, { L"RightTrigger", L"Right trigger", L"F, RShift" },
+    { L"Start", L"Pause / Start", L"Enter" }, { L"Back", L"Back button", L"Escape" },
+    { L"DpadUp", L"D-pad up", L"Up" }, { L"DpadDown", L"D-pad down", L"Down" },
+    { L"DpadLeft", L"D-pad left", L"Left, WheelDown" }, { L"DpadRight", L"D-pad right", L"Right, WheelUp" },
+    { L"LookUp", L"Camera up", L"I" }, { L"LookDown", L"Camera down", L"K" },
+    { L"LookLeft", L"Camera left", L"J" }, { L"LookRight", L"Camera right", L"L" },
+    { L"LeftStickClick", L"Left stick click", L"LCtrl" }, { L"RightStickClick", L"Right stick click", L"V" },
+};
+#define N_CTL_ACTIONS ((int)(sizeof k_ctl_actions / sizeof k_ctl_actions[0]))
+static const struct { const WCHAR *name; int vk; } k_ctl_keys[] = {
+    { L"Space", VK_SPACE }, { L"Enter", VK_RETURN }, { L"Escape", VK_ESCAPE }, { L"Backspace", VK_BACK }, { L"Tab", VK_TAB },
+    { L"LShift", VK_LSHIFT }, { L"RShift", VK_RSHIFT }, { L"LCtrl", VK_LCONTROL }, { L"RCtrl", VK_RCONTROL },
+    { L"LAlt", VK_LMENU }, { L"RAlt", VK_RMENU }, { L"Up", VK_UP }, { L"Down", VK_DOWN }, { L"Left", VK_LEFT }, { L"Right", VK_RIGHT },
+    { L"Insert", VK_INSERT }, { L"Delete", VK_DELETE }, { L"Home", VK_HOME }, { L"End", VK_END }, { L"PageUp", VK_PRIOR },
+    { L"PageDown", VK_NEXT }, { L"CapsLock", VK_CAPITAL },
+    { L"MouseLeft", VK_LBUTTON }, { L"MouseRight", VK_RBUTTON }, { L"MouseMiddle", VK_MBUTTON }, { L"Mouse4", VK_XBUTTON1 },
+    { L"Mouse5", VK_XBUTTON2 }, { L"WheelUp", 0x1001 }, { L"WheelDown", 0x1002 },
+    { L"Num0", VK_NUMPAD0 }, { L"Num1", VK_NUMPAD1 }, { L"Num2", VK_NUMPAD2 }, { L"Num3", VK_NUMPAD3 }, { L"Num4", VK_NUMPAD4 },
+    { L"Num5", VK_NUMPAD5 }, { L"Num6", VK_NUMPAD6 }, { L"Num7", VK_NUMPAD7 }, { L"Num8", VK_NUMPAD8 }, { L"Num9", VK_NUMPAD9 },
+    { L"F1", VK_F1 }, { L"F2", VK_F2 }, { L"F3", VK_F3 }, { L"F4", VK_F4 }, { L"F5", VK_F5 }, { L"F6", VK_F6 }, { L"F7", VK_F7 },
+    { L"F8", VK_F8 }, { L"F9", VK_F9 }, { L"F10", VK_F10 }, { L"F12", VK_F12 },
+    { L";", VK_OEM_1 }, { L"=", VK_OEM_PLUS }, { L",", VK_OEM_COMMA }, { L"-", VK_OEM_MINUS }, { L".", VK_OEM_PERIOD },
+    { L"/", VK_OEM_2 }, { L"`", VK_OEM_3 }, { L"[", VK_OEM_4 }, { L"\\", VK_OEM_5 }, { L"]", VK_OEM_6 }, { L"'", VK_OEM_7 },
+};
+static WCHAR s_ctl_bind[32][64];           /* each action's keys, as written ("E, MouseLeft") */
+static int   s_ctl_capture = -1;           /* the action waiting for a key, or -1 */
+static int   s_ctl_capture_second;         /* ...added as its second key */
+
+static const WCHAR *ctl_key_name(int vk, WCHAR *tmp)
+{
+    int i;
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+        tmp[0] = (WCHAR)vk;
+        tmp[1] = 0;
+        return tmp;
+    }
+    for (i = 0; i < (int)(sizeof k_ctl_keys / sizeof k_ctl_keys[0]); i++)
+        if (k_ctl_keys[i].vk == vk)
+            return k_ctl_keys[i].name;
+    return NULL;
+}
+
+static void ctl_show(void)
+{
+    HWND lv = ctl(ID_CTL_LIST);
+    int i, sel = (int)SendMessageW(lv, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+    ListView_DeleteAllItems(lv);
+    for (i = 0; i < N_CTL_ACTIONS; i++) {
+        LVITEMW it;
+        memset(&it, 0, sizeof it);
+        it.mask = LVIF_TEXT;
+        it.iItem = i;
+        it.pszText = (WCHAR *)k_ctl_actions[i].label;
+        ListView_InsertItem(lv, &it);
+        ListView_SetItemText(lv, i, 1, s_ctl_bind[i][0] ? s_ctl_bind[i] : L"(none)");
+    }
+    if (sel >= 0) {
+        ListView_SetItemState(lv, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(lv, sel, FALSE);
+    }
+}
+
+static void ctl_load(void)
+{
+    WCHAR p[MAX_PATH], v[32];
+    int i;
+    settings_path(p);
+    for (i = 0; i < N_CTL_ACTIONS; i++)
+        GetPrivateProfileStringW(L"Keys", k_ctl_actions[i].key, k_ctl_actions[i].def, s_ctl_bind[i], 64, p);
+    CheckDlgButton(s_wnd, ID_CTL_MOUSELOOK, GetPrivateProfileIntW(L"Controls", L"MouseLook", 1, p) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_wnd, ID_CTL_INVERTY, GetPrivateProfileIntW(L"Controls", L"MouseInvertY", 0, p) ? BST_CHECKED : BST_UNCHECKED);
+    GetPrivateProfileStringW(L"Controls", L"MouseSensitivity", L"1.0", v, 32, p);
+    SendMessageW(ctl(ID_CTL_SENS), TBM_SETPOS, TRUE, (LPARAM)(int)(_wtof(v) * 10.0 + 0.5));
+    s_ctl_capture = -1;
+    ctl_show();
+    set_text(ID_CTL_STATUS, L"Select an action, then Change key and press the key or mouse button.");
+}
+
+static void ctl_save(void)
+{
+    WCHAR p[MAX_PATH], v[32];
+    int i;
+    if (!is_game_folder(s_game_dir)) {
+        set_text(ID_CTL_STATUS, L"Install the game first (Install tab).");
+        return;
+    }
+    settings_path(p);
+    for (i = 0; i < N_CTL_ACTIONS; i++)
+        WritePrivateProfileStringW(L"Keys", k_ctl_actions[i].key, s_ctl_bind[i], p);
+    WritePrivateProfileStringW(L"Controls", L"MouseLook", IsDlgButtonChecked(s_wnd, ID_CTL_MOUSELOOK) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Controls", L"MouseInvertY", IsDlgButtonChecked(s_wnd, ID_CTL_INVERTY) ? L"1" : L"0", p);
+    swprintf_s(v, 32, L"%.1f", (int)SendMessageW(ctl(ID_CTL_SENS), TBM_GETPOS, 0, 0) / 10.0);
+    WritePrivateProfileStringW(L"Controls", L"MouseSensitivity", v, p);
+    set_text(ID_CTL_STATUS, L"Saved. The game reads the controls when it starts.");
+}
+
+static void ctl_start_capture(int second)
+{
+    int sel = (int)SendMessageW(ctl(ID_CTL_LIST), LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+    WCHAR m[160];
+    if (sel < 0) {
+        set_text(ID_CTL_STATUS, L"Select an action first.");
+        return;
+    }
+    s_ctl_capture = sel;
+    s_ctl_capture_second = second;
+    swprintf_s(m, 160, L"Press a key or mouse button for \"%s\" (roll the wheel for the wheel).", k_ctl_actions[sel].label);
+    set_text(ID_CTL_STATUS, m);
+}
+
+/* From the message loop: a key or button while an action waits for one; 1 when used. */
+static int ctl_capture_msg(const MSG *msg)
+{
+    int vk = 0;
+    WCHAR tmp[4], m[200];
+    const WCHAR *name;
+    if (s_ctl_capture < 0 || s_cur_tab != TAB_CONTROLS)
+        return 0;
+    switch (msg->message) {
+    case WM_KEYDOWN: case WM_SYSKEYDOWN: {
+        UINT scan = (UINT)(msg->lParam >> 16) & 0xFF;
+        int ext = (msg->lParam >> 24) & 1;
+        vk = (int)msg->wParam;
+        if (vk == VK_SHIFT)
+            vk = (int)MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX);
+        else if (vk == VK_CONTROL)
+            vk = ext ? VK_RCONTROL : VK_LCONTROL;
+        else if (vk == VK_MENU)
+            vk = ext ? VK_RMENU : VK_LMENU;
+        break;
+    }
+    case WM_LBUTTONDOWN: vk = VK_LBUTTON; break;
+    case WM_RBUTTONDOWN: vk = VK_RBUTTON; break;
+    case WM_MBUTTONDOWN: vk = VK_MBUTTON; break;
+    case WM_XBUTTONDOWN: vk = HIWORD(msg->wParam) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2; break;
+    case WM_MOUSEWHEEL: vk = (short)HIWORD(msg->wParam) > 0 ? 0x1001 : 0x1002; break;
+    default: return 0;
+    }
+    name = ctl_key_name(vk, tmp);
+    if (!name) {
+        set_text(ID_CTL_STATUS, L"That key can't be used. Try another.");
+        return 1;
+    }
+    {
+        WCHAR first[64] = L"", *c;
+        wcscpy_s(first, 64, s_ctl_bind[s_ctl_capture]);
+        if ((c = wcschr(first, L',')) != NULL)
+            *c = 0;
+        if (s_ctl_capture_second && first[0] && _wcsicmp(first, name))
+            swprintf_s(s_ctl_bind[s_ctl_capture], 64, L"%s, %s", first, name);
+        else
+            wcscpy_s(s_ctl_bind[s_ctl_capture], 64, name);
+    }
+    swprintf_s(m, 200, L"\"%s\" is now %s. Save to keep it.", k_ctl_actions[s_ctl_capture].label, s_ctl_bind[s_ctl_capture]);
+    s_ctl_capture = -1;
+    ctl_show();
+    set_text(ID_CTL_STATUS, m);
+    return 1;
+}
+
+/* ── Saves ─────────────────────────────────────────────────────────────────
+ *
+ * The game's saves are ordinary files: UDATA\56550005\<save id>\<name> (1 KB)
+ * with SaveMeta.xbx (UTF-16 "Name=BUFFY A") beside it; TDATA\56550005 holds
+ * the title's own data. This page lists them and copies them to and from
+ * dated folders in SaveBackups (a restore first backs the current ones up). */
+#define SAVE_TITLE L"56550005"
+
+static void sav_path(WCHAR *out, const WCHAR *sub)
+{
+    swprintf_s(out, MAX_PATH, L"%s\\%s", s_game_dir, sub);
+}
+
+/* Copy (or with del, delete) a folder tree; 1 when done. */
+static int sav_shell(UINT func, const WCHAR *from, const WCHAR *to)
+{
+    SHFILEOPSTRUCTW op;
+    WCHAR f[MAX_PATH + 2], t[MAX_PATH + 2];
+    memset(f, 0, sizeof f);
+    memset(t, 0, sizeof t);
+    wcscpy_s(f, MAX_PATH, from);
+    if (to)
+        wcscpy_s(t, MAX_PATH, to);
+    memset(&op, 0, sizeof op);
+    op.hwnd = s_wnd;
+    op.wFunc = func;
+    op.pFrom = f;
+    op.pTo = to ? t : NULL;
+    op.fFlags = FOF_NO_UI;
+    return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+}
+
+static void sav_refresh(void)
+{
+    HWND lv = ctl(ID_SAV_LIST);
+    WCHAR root[MAX_PATH], pat[MAX_PATH], v[128];
+    WIN32_FIND_DATAW fd;
+    HANDLE f;
+    int n = 0;
+    ListView_DeleteAllItems(lv);
+    if (!is_game_folder(s_game_dir)) {
+        set_text(ID_SAV_STATUS, L"Install the game first (Install tab).");
+        return;
+    }
+    swprintf_s(root, MAX_PATH, L"%s\\UDATA\\" SAVE_TITLE, s_game_dir);
+    swprintf_s(pat, MAX_PATH, L"%s\\*", root);
+    f = FindFirstFileW(pat, &fd);
+    if (f != INVALID_HANDLE_VALUE) {
+        do {
+            WCHAR meta[MAX_PATH], name[64] = L"", when[64] = L"";
+            FILE *m;
+            LVITEMW it;
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.')
+                continue;
+            swprintf_s(meta, MAX_PATH, L"%s\\%s\\SaveMeta.xbx", root, fd.cFileName);
+            if (!_wfopen_s(&m, meta, L"rb") && m) {
+                WCHAR buf[128] = L"", *p;
+                size_t got = fread(buf, 2, 127, m);
+                fclose(m);
+                buf[got] = 0;
+                if ((p = wcsstr(buf, L"Name=")) != NULL) {
+                    wcsncpy_s(name, 64, p + 5, _TRUNCATE);
+                    if ((p = wcspbrk(name, L"\r\n")) != NULL)
+                        *p = 0;
+                }
+            }
+            if (!name[0])
+                continue;
+            {
+                /* last played: the save file's time */
+                WCHAR sf[MAX_PATH];
+                WIN32_FILE_ATTRIBUTE_DATA a;
+                SYSTEMTIME st, lt;
+                swprintf_s(sf, MAX_PATH, L"%s\\%s\\%s", root, fd.cFileName, name);
+                if (GetFileAttributesExW(sf, GetFileExInfoStandard, &a) && FileTimeToSystemTime(&a.ftLastWriteTime, &st)
+                        && SystemTimeToTzSpecificLocalTime(NULL, &st, &lt))
+                    swprintf_s(when, 64, L"%04u-%02u-%02u %02u:%02u", lt.wYear, lt.wMonth, lt.wDay, lt.wHour, lt.wMinute);
+            }
+            memset(&it, 0, sizeof it);
+            it.mask = LVIF_TEXT;
+            it.iItem = n;
+            it.pszText = name;
+            ListView_InsertItem(lv, &it);
+            ListView_SetItemText(lv, n, 1, when);
+            ListView_SetItemText(lv, n, 2, fd.cFileName);
+            n++;
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
+    swprintf_s(v, 128, n ? L"%d saves. Backups go to SaveBackups in the game folder." : L"No saves yet.", n);
+    set_text(ID_SAV_STATUS, v);
+}
+
+/* Back up UDATA and TDATA into SaveBackups\<date><suffix>; the folder name in `made`. */
+static int sav_backup_to(const WCHAR *suffix, WCHAR *made)
+{
+    WCHAR dst[MAX_PATH], src[MAX_PATH];
+    SYSTEMTIME t;
+    int ok = 1;
+    GetLocalTime(&t);
+    sav_path(dst, L"SaveBackups");
+    CreateDirectoryW(dst, NULL);
+    swprintf_s(made, MAX_PATH, L"%04u-%02u-%02u %02u.%02u.%02u%s", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, suffix);
+    swprintf_s(dst, MAX_PATH, L"%s\\SaveBackups\\%s", s_game_dir, made);
+    CreateDirectoryW(dst, NULL);
+    sav_path(src, L"UDATA");
+    if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+        ok &= sav_shell(FO_COPY, src, dst);
+    sav_path(src, L"TDATA");
+    if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+        ok &= sav_shell(FO_COPY, src, dst);
+    return ok;
+}
+
+static int sav_game_running(void)
+{
+    if (s_game_proc && WaitForSingleObject(s_game_proc, 0) == WAIT_TIMEOUT) {
+        set_text(ID_SAV_STATUS, L"The game is running: close it first.");
+        return 1;
+    }
+    return 0;
+}
+
+static void sav_backup(void)
+{
+    WCHAR made[MAX_PATH], m[MAX_PATH + 64];
+    if (!is_game_folder(s_game_dir) || sav_game_running())
+        return;
+    if (sav_backup_to(L"", made)) {
+        swprintf_s(m, MAX_PATH + 64, L"Backed up to SaveBackups\\%s.", made);
+        set_text(ID_SAV_STATUS, m);
+    } else
+        set_text(ID_SAV_STATUS, L"The backup could not be written.");
+}
+
+static void sav_restore_from(const WCHAR *pick, int ask);
+
+static void sav_restore(void)
+{
+    BROWSEINFOW bi;
+    PIDLIST_ABSOLUTE pidl;
+    WCHAR pick[MAX_PATH], root[MAX_PATH];
+    if (!is_game_folder(s_game_dir) || sav_game_running())
+        return;
+    sav_path(root, L"SaveBackups");
+    CreateDirectoryW(root, NULL);
+    memset(&bi, 0, sizeof bi);
+    bi.hwndOwner = s_wnd;
+    bi.lpszTitle = L"Choose a backup in SaveBackups to restore";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON;
+    {
+        PIDLIST_ABSOLUTE start = NULL;
+        if (SUCCEEDED(SHParseDisplayName(root, NULL, &start, 0, NULL)))
+            bi.pidlRoot = start;
+        pidl = SHBrowseForFolderW(&bi);
+        if (start)
+            CoTaskMemFree(start);
+    }
+    if (!pidl)
+        return;
+    if (!SHGetPathFromIDListW(pidl, pick)) {
+        CoTaskMemFree(pidl);
+        return;
+    }
+    CoTaskMemFree(pidl);
+    sav_restore_from(pick, 1);
+}
+
+/* Restore the backup in folder `pick` (ask = 1: confirm first). */
+static void sav_restore_from(const WCHAR *pick, int ask)
+{
+    WCHAR made[MAX_PATH], src[MAX_PATH], dst[MAX_PATH], m[MAX_PATH + 96];
+    swprintf_s(src, MAX_PATH, L"%s\\UDATA", pick);
+    if (GetFileAttributesW(src) == INVALID_FILE_ATTRIBUTES) {
+        set_text(ID_SAV_STATUS, L"That folder is not a save backup (no UDATA in it).");
+        return;
+    }
+    if (ask && MessageBoxW(s_wnd, L"Replace the current saves with this backup?\n\nThe current saves are backed up first.",
+                    L"Restore saves", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+        return;
+    if (!sav_backup_to(L" (before restore)", made)) {
+        set_text(ID_SAV_STATUS, L"Could not back up the current saves first: nothing was changed.");
+        return;
+    }
+    sav_path(dst, L"UDATA");
+    sav_shell(FO_DELETE, dst, NULL);
+    sav_path(dst, L"");
+    dst[wcslen(dst) - 1] = 0;                            /* (the game folder, no trailing slash) */
+    if (!sav_shell(FO_COPY, src, dst)) {
+        swprintf_s(m, MAX_PATH + 96, L"The restore failed; your saves are in SaveBackups\\%s.", made);
+        set_text(ID_SAV_STATUS, m);
+        return;
+    }
+    swprintf_s(src, MAX_PATH, L"%s\\TDATA", pick);
+    if (GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES) {
+        WCHAR t2[MAX_PATH];
+        sav_path(t2, L"TDATA");
+        sav_shell(FO_DELETE, t2, NULL);
+        sav_shell(FO_COPY, src, dst);
+    }
+    sav_refresh();
+    swprintf_s(m, MAX_PATH + 96, L"Restored. The saves from before are in SaveBackups\\%s.", made);
+    set_text(ID_SAV_STATUS, m);
+}
+
+static void mdl_refresh(void)
+{
+    int ok = is_game_folder(s_game_dir), i;
+    int ids[] = { ID_MDL_PICK, ID_MDL_EXPORT, ID_MDL_OPEN, ID_MDL_FILE, ID_MDL_BROWSE, ID_MDL_BASE, ID_MDL_NAME, ID_MDL_CREATE };
+    for (i = 0; i < (int)(sizeof ids / sizeof ids[0]); i++)
+        EnableWindow(ctl(ids[i]), ok);
+    EnableWindow(ctl(ID_MDL_HASH), ok && k_models[SendMessageW(ctl(ID_MDL_PICK), CB_GETCURSEL, 0, 0)].hash == 0);
+    if (!ok)
+        set_text(ID_MDL_STATUS, L"Install the game first (Install tab).");
+}
+
+static DWORD WINAPI export_watch(LPVOID p)
+{
+    HANDLE h = (HANDLE)p;
+    DWORD code = 0;
+    WaitForSingleObject(h, INFINITE);
+    GetExitCodeProcess(h, &code);
+    PostMessageW(s_wnd, WM_APP_EXPORTEND, code, 0);
+    return 0;
+}
+
+static void mdl_export(void)
+{
+    WCHAR exe[MAX_PATH], cmd[MAX_PATH + 4], v[64], d[MAX_PATH];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    int sel = (int)SendMessageW(ctl(ID_MDL_PICK), CB_GETCURSEL, 0, 0);
+    unsigned hash;
+    if (!is_game_folder(s_game_dir) || sel < 0 || sel >= N_MODELS)
+        return;
+    if ((s_game_proc && WaitForSingleObject(s_game_proc, 0) == WAIT_TIMEOUT)
+            || (s_export_proc && WaitForSingleObject(s_export_proc, 0) == WAIT_TIMEOUT)) {
+        set_text(ID_MDL_STATUS, L"The game is running: close it first.");
+        return;
+    }
+    hash = k_models[sel].hash;
+    if (!hash) {
+        GetWindowTextW(ctl(ID_MDL_HASH), v, 64);
+        hash = (unsigned)wcstoul(v, NULL, 16);
+        if (!hash) {
+            set_text(ID_MDL_STATUS, L"Type the model file's hash (hex, e.g. 01000026).");
+            return;
+        }
+    }
+    models_dir(d, L"export");
+    mkdirs(d);
+    swprintf_s(v, 64, L"%08X", hash);
+    SetEnvironmentVariableW(L"BUFFY_EXPORT_MODEL", v);
+    SetEnvironmentVariableW(L"BUFFY_EXPORT_DIR", d);
+    join(exe, s_game_dir, GAME_EXE);
+    swprintf_s(cmd, MAX_PATH + 4, L"\"%s\"", exe);
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, s_game_dir, &si, &pi)) {
+        WCHAR m[128];
+        swprintf_s(m, 128, L"Windows could not start the game (error %lu).", GetLastError());
+        set_text(ID_MDL_STATUS, m);
+    } else {
+        HANDLE dup;
+        CloseHandle(pi.hThread);
+        if (s_export_proc)
+            CloseHandle(s_export_proc);
+        s_export_proc = pi.hProcess;
+        DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &dup, SYNCHRONIZE | PROCESS_QUERY_INFORMATION,
+                        FALSE, 0);
+        CloseHandle(CreateThread(NULL, 0, export_watch, dup, 0, NULL));
+        EnableWindow(ctl(ID_MDL_EXPORT), FALSE);
+        set_text(ID_MDL_STATUS, L"Exporting: the game starts, reads the model and closes by itself...");
+    }
+    SetEnvironmentVariableW(L"BUFFY_EXPORT_MODEL", NULL);
+    SetEnvironmentVariableW(L"BUFFY_EXPORT_DIR", NULL);
+}
+
+static void mdl_export_done(DWORD code)
+{
+    WCHAR d[MAX_PATH];
+    EnableWindow(ctl(ID_MDL_EXPORT), TRUE);
+    models_dir(d, L"export");
+    if (code == 0) {
+        set_text(ID_MDL_STATUS, L"Exported to models\\export. In Blender: File > Import > glTF 2.0.");
+        ShellExecuteW(s_wnd, L"open", d, NULL, NULL, SW_SHOWNORMAL);
+    } else {
+        WCHAR m[160];
+        swprintf_s(m, 160, L"The export did not finish (code %lu) - see buffy_log.txt in the game folder.", code);
+        set_text(ID_MDL_STATUS, m);
+    }
+}
+
+static void mdl_browse(void)
+{
+    OPENFILENAMEW of;
+    WCHAR buf[MAX_PATH] = L"", d[MAX_PATH];
+    models_dir(d, NULL);
+    memset(&of, 0, sizeof of);
+    of.lStructSize = sizeof of;
+    of.hwndOwner = s_wnd;
+    of.lpstrFilter = L"glTF binary models (*.glb)\0*.glb\0All files\0*.*\0";
+    of.lpstrFile = buf;
+    of.nMaxFile = MAX_PATH;
+    of.lpstrInitialDir = d;
+    of.lpstrTitle = L"Choose the model you made in Blender";
+    of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (GetOpenFileNameW(&of))
+        set_text(ID_MDL_FILE, buf);
+}
+
+static void mdl_create(void)
+{
+    WCHAR file[MAX_PATH], name[64], folder[80], d[MAX_PATH], dst[MAX_PATH], ini[MAX_PATH], v[16];
+    int base = (int)SendMessageW(ctl(ID_MDL_BASE), CB_GETCURSEL, 0, 0), i, n = 0;
+    FILE *f;
+    if (!is_game_folder(s_game_dir))
+        return;
+    GetWindowTextW(ctl(ID_MDL_FILE), file, MAX_PATH);
+    GetWindowTextW(ctl(ID_MDL_NAME), name, 64);
+    if (GetFileAttributesW(file) == INVALID_FILE_ATTRIBUTES) {
+        set_text(ID_MDL_STATUS, L"Choose your .glb model first.");
+        return;
+    }
+    if (!name[0] || base < 0 || base > 5) {
+        set_text(ID_MDL_STATUS, L"Give the character a name and pick who they play as.");
+        return;
+    }
+    /* folder: character-<name>, lower case, letters and digits */
+    wcscpy_s(folder, 80, L"character-");
+    n = (int)wcslen(folder);
+    for (i = 0; name[i] && n < 78; i++) {
+        WCHAR c = towlower(name[i]);
+        if (iswalnum(c))
+            folder[n++] = c;
+        else if (n && folder[n - 1] != L'-')
+            folder[n++] = L'-';
+    }
+    folder[n] = 0;
+    mods_dir(d);
+    join(dst, d, folder);
+    mkdirs(dst);
+    join(ini, dst, L"model.glb");
+    if (!CopyFileW(file, ini, FALSE)) {
+        set_text(ID_MDL_STATUS, L"Could not copy the model into the mod folder.");
+        return;
+    }
+    join(ini, dst, L"mod.ini");
+    if (_wfopen_s(&f, ini, L"w, ccs=UTF-8") || !f) {
+        set_text(ID_MDL_STATUS, L"Could not write the mod's mod.ini.");
+        return;
+    }
+    fwprintf(f, L"[Mod]\nName = %s\nAuthor = \nVersion = 1.0\n", name);
+    fwprintf(f, L"Description = %s joins the in-level Character Select (Player 1 Change Character and Story co-op). "
+                L"A custom model, playing as %s: the same moves, spells, inventory and story part.\n\n", name, k_bases[base]);
+    fwprintf(f, L"[Character]\n; whose moves, spells and inventory (0 Buffy, 1 Willow, 2 Xander, 3 Spike, 4 Sid, 5 Faith)\n");
+    swprintf_s(v, 16, L"%d", base);
+    fwprintf(f, L"BaseCharacter = %s\n; the model (made in Blender on the base character's skeleton), in this folder\n"
+                L"ModelFile = model.glb\n; the roster portrait the page slot borrows (-1: the first free one)\nPortrait = -1\n", v);
+    fclose(f);
+    {
+        WCHAR m[200];
+        swprintf_s(m, 200, L"Made the mod %s - tick it on the Mods tab.", folder);
+        set_text(ID_MDL_STATUS, m);
+    }
+}
+
 /* ── window ────────────────────────────────────────────────────────────── */
 
 #define HEADER_H 64      /* dark title band */
@@ -1513,7 +2180,16 @@ static void show_tab(int t)
         mods_scan();
     if (t == TAB_TEXTURES)
         tex_refresh();
+    if (t == TAB_ADVANCED)
+        mdl_refresh();
+    if (t == TAB_SAVES)
+        sav_refresh();
+    if (t == TAB_CONTROLS)
+        ctl_load();
     TabCtrl_SetCurSel(s_tab, t);
+    /* the page repainted whole: the last page's hidden controls left their
+     * pixels behind the new page's transparent group boxes */
+    RedrawWindow(s_wnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
 #define X0 28
@@ -1524,7 +2200,7 @@ static void build_ui(void)
     LVCOLUMNW col;
     WCHAR v[64];
     int i;
-    static const WCHAR *names[TAB_COUNT] = { L"Play", L"Settings", L"Mods", L"Textures", L"Install" };
+    static const WCHAR *names[TAB_COUNT] = { L"Play", L"Settings", L"Controls", L"Mods", L"Textures", L"Saves", L"Advanced", L"Install" };
 
     /* Just the strip of tabs; the pages below are plain window. */
     s_tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER,
@@ -1551,8 +2227,16 @@ static void build_ui(void)
                              L"also has Resolution and VSync, and the main menu has Exit.",
         SS_LEFT, X0, 356, 560, 40, 0);
     add(TAB_PLAY, L"Button", L"Open bug reports", BS_PUSHBUTTON | WS_TABSTOP, X0 + 420, 434, 140, 30, ID_REPORTS_OPEN);
-    swprintf_s(v, 64, L"Launcher version %s", LAUNCHER_VERSION);
-    add(TAB_PLAY, L"Static", v, SS_LEFT, X0, 440, 300, 20, ID_VERSION);
+    (void)v;
+    add(TAB_PLAY, L"Button", L"Updates", BS_GROUPBOX, X0, 474, 560, 92, 0);
+    add(TAB_PLAY, L"Static", L"", SS_LEFT | SS_ENDELLIPSIS, X0 + 14, 498, 532, 20, ID_UPD_STATUS);
+    add(TAB_PLAY, L"Button", L"Check when the launcher starts", BS_AUTOCHECKBOX | WS_TABSTOP,
+        X0 + 14, 528, 236, 24, ID_UPD_AUTO);
+    add(TAB_PLAY, L"Button", L"What's new", BS_PUSHBUTTON | WS_TABSTOP, X0 + 254, 526, 92, 28, ID_UPD_NOTES);
+    add(TAB_PLAY, L"Button", L"Check now", BS_PUSHBUTTON | WS_TABSTOP, X0 + 352, 526, 92, 28, ID_UPD_CHECK);
+    add(TAB_PLAY, L"Button", L"Update", BS_PUSHBUTTON | WS_TABSTOP, X0 + 450, 526, 96, 28, ID_UPD_APPLY);
+    CheckDlgButton(s_wnd, ID_UPD_AUTO,
+                   GetPrivateProfileIntW(L"Launcher", L"CheckUpdates", 1, s_launcher_ini) ? BST_CHECKED : BST_UNCHECKED);
 
     /* Settings */
     add(TAB_SETTINGS, L"Button", L"Display", BS_GROUPBOX, X0, 50, 560, 236, 0);
@@ -1567,24 +2251,38 @@ static void build_ui(void)
                                  L"menus and movies stay 4:3.", SS_LEFT, X0 + 150, 144, 400, 36, 0);
     add(TAB_SETTINGS, L"Button", L"VSync (no tearing; waits for the monitor's refresh)", BS_AUTOCHECKBOX | WS_TABSTOP,
         X0 + 16, 184, 420, 24, ID_VSYNC);
-    add(TAB_SETTINGS, L"Button", L"Widescreen: keep the original side-to-side view (no pop-in or clipping at the edges)",
+    add(TAB_SETTINGS, L"Button", L"Widescreen: the original 4:3 view zoomed to fill the screen (instead of the full 16:9 view)",
         BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, X0 + 16, 212, 530, 36, ID_WS_SAFE);
     add(TAB_SETTINGS, L"Static", L"Renderer", SS_LEFT, X0 + 16, 256, 120, 20, 0);
     h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 150, 252, 300, 100, ID_RENDERER);
     SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Native Direct3D 11 (fastest)");
     SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Emulated Xbox GPU (fallback)");
-    add(TAB_SETTINGS, L"Button", L"Game and controls", BS_GROUPBOX, X0, 292, 560, 108, 0);
+    add(TAB_SETTINGS, L"Button", L"Performance", BS_GROUPBOX, X0, 292, 560, 110, 0);
+    add(TAB_SETTINGS, L"Static", L"FPS limit", SS_LEFT, X0 + 16, 316, 120, 20, 0);
+    h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 150, 312, 110, 100, ID_FPS_LIMIT);
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
+    add(TAB_SETTINGS, L"Static", L"The game's speed follows its frame rate: 60 at most.",
+        SS_LEFT, X0 + 272, 316, 280, 20, 0);
+    add(TAB_SETTINGS, L"Button", L"Show FPS counter", BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 16, 342, 180, 24, ID_SHOW_FPS);
+    add(TAB_SETTINGS, L"Button", L"Debug overlay (FPS, frame times, renderer, GPU)", BS_AUTOCHECKBOX | WS_TABSTOP,
+        X0 + 200, 342, 350, 24, ID_OVERLAY);
+    add(TAB_SETTINGS, L"Button", L"Frame interpolation (120 Hz+ screens; experimental)", BS_AUTOCHECKBOX | WS_TABSTOP,
+        X0 + 16, 370, 330, 24, ID_INTERP);
+    add(TAB_SETTINGS, L"Button", L"Preload game data (no hitches)", BS_AUTOCHECKBOX | WS_TABSTOP,
+        X0 + 350, 370, 205, 24, ID_PRELOAD);
+    add(TAB_SETTINGS, L"Button", L"Game and controls", BS_GROUPBOX, X0, 410, 560, 108, 0);
     add(TAB_SETTINGS, L"Button", L"Skip the intro movies at start-up", BS_AUTOCHECKBOX | WS_TABSTOP,
-        X0 + 16, 312, 420, 24, ID_SKIP_INTRO);
+        X0 + 16, 430, 420, 24, ID_SKIP_INTRO);
     add(TAB_SETTINGS, L"Button", L"Invert camera left / right (right stick)", BS_AUTOCHECKBOX | WS_TABSTOP,
-        X0 + 16, 340, 420, 24, ID_INVERT_X);
+        X0 + 16, 458, 420, 24, ID_INVERT_X);
     add(TAB_SETTINGS, L"Button", L"Bug report button: click the left stick (or press F12) to save what is on screen",
-        BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 16, 368, 530, 24, ID_REPORT_BTN);
-    add(TAB_SETTINGS, L"Static", L"Volume, subtitles and vibration are set from Options in the game.",
-        SS_LEFT, X0, 404, 560, 18, 0);
-    add(TAB_SETTINGS, L"Button", L"Restore defaults", BS_PUSHBUTTON | WS_TABSTOP, X0, 424, 140, 30, ID_DEFAULTS);
-    add(TAB_SETTINGS, L"Button", L"Save", BS_PUSHBUTTON | WS_TABSTOP, X0 + 452, 424, 108, 30, ID_SAVE);
-    add(TAB_SETTINGS, L"Static", L"", SS_LEFT, X0 + 150, 430, 290, 20, ID_SETTINGS_STATUS);
+        BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 16, 486, 530, 24, ID_REPORT_BTN);
+    add(TAB_SETTINGS, L"Static", L"Volume, subtitles and vibration are set from Options in the game. PC Settings "
+                                 L"there has these display options too.", SS_LEFT, X0, 524, 560, 34, 0);
+    add(TAB_SETTINGS, L"Button", L"Restore defaults", BS_PUSHBUTTON | WS_TABSTOP, X0, 562, 140, 30, ID_DEFAULTS);
+    add(TAB_SETTINGS, L"Button", L"Save", BS_PUSHBUTTON | WS_TABSTOP, X0 + 452, 562, 108, 30, ID_SAVE);
+    add(TAB_SETTINGS, L"Static", L"", SS_LEFT, X0 + 150, 568, 290, 20, ID_SETTINGS_STATUS);
 
     /* Mods */
     lv = add(TAB_MODS, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
@@ -1628,12 +2326,90 @@ static void build_ui(void)
     add(TAB_TEXTURES, L"Button", L"Open dump folder", BS_PUSHBUTTON | WS_TABSTOP, X0 + 150, 420, 140, 30, ID_TEX_OPEN_DUMP);
     add(TAB_TEXTURES, L"Button", L"Refresh", BS_PUSHBUTTON | WS_TABSTOP, X0 + 460, 420, 100, 30, ID_TEX_REFRESH);
 
+    /* Controls */
+    add(TAB_CONTROLS, L"Static", L"Player 1's keyboard and mouse (controllers work as they are). While you play, the mouse "
+                                 L"turns the camera; menus and the pause free it.", SS_LEFT, X0, 50, 560, 36, 0);
+    lv = add(TAB_CONTROLS, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
+             X0, 90, 400, 300, ID_CTL_LIST);
+    ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    SetWindowTheme(lv, L"Explorer", NULL);
+    memset(&col, 0, sizeof col);
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.pszText = L"Action"; col.cx = S(170); ListView_InsertColumn(lv, 0, &col);
+    col.pszText = L"Keys"; col.cx = S(200); ListView_InsertColumn(lv, 1, &col);
+    add(TAB_CONTROLS, L"Button", L"Change key", BS_PUSHBUTTON | WS_TABSTOP, X0 + 410, 90, 150, 28, ID_CTL_CHANGE);
+    add(TAB_CONTROLS, L"Button", L"Add a second key", BS_PUSHBUTTON | WS_TABSTOP, X0 + 410, 124, 150, 28, ID_CTL_SECOND);
+    add(TAB_CONTROLS, L"Button", L"Clear", BS_PUSHBUTTON | WS_TABSTOP, X0 + 410, 158, 150, 28, ID_CTL_CLEAR);
+    add(TAB_CONTROLS, L"Button", L"Reset all", BS_PUSHBUTTON | WS_TABSTOP, X0 + 410, 192, 150, 28, ID_CTL_RESET);
+    add(TAB_CONTROLS, L"Button", L"Mouse look", BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 410, 236, 150, 24, ID_CTL_MOUSELOOK);
+    add(TAB_CONTROLS, L"Button", L"Invert mouse Y", BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 410, 262, 150, 24, ID_CTL_INVERTY);
+    add(TAB_CONTROLS, L"Static", L"Mouse speed", SS_LEFT, X0 + 410, 294, 150, 20, ID_CTL_SENS_LABEL);
+    h = add(TAB_CONTROLS, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, X0 + 404, 316, 160, 30, ID_CTL_SENS);
+    SendMessageW(h, TBM_SETRANGE, TRUE, MAKELPARAM(2, 40));
+    add(TAB_CONTROLS, L"Static", L"", SS_LEFT, X0, 398, 560, 40, ID_CTL_STATUS);
+    add(TAB_CONTROLS, L"Button", L"Save", BS_PUSHBUTTON | WS_TABSTOP, X0 + 452, 444, 108, 30, ID_CTL_SAVE);
+
+    /* Saves */
+    add(TAB_SAVES, L"Static", L"Your saves are ordinary files in the game folder. Back them up, restore a backup, "
+                              L"or open the folder to copy them yourself.", SS_LEFT, X0, 50, 560, 36, 0);
+    lv = add(TAB_SAVES, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
+             X0, 92, 560, 220, ID_SAV_LIST);
+    ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    SetWindowTheme(lv, L"Explorer", NULL);
+    memset(&col, 0, sizeof col);
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.pszText = L"Save"; col.cx = S(200); ListView_InsertColumn(lv, 0, &col);
+    col.pszText = L"Last played"; col.cx = S(160); ListView_InsertColumn(lv, 1, &col);
+    col.pszText = L"Folder"; col.cx = S(180); ListView_InsertColumn(lv, 2, &col);
+    add(TAB_SAVES, L"Static", L"", SS_LEFT, X0, 322, 560, 40, ID_SAV_STATUS);
+    add(TAB_SAVES, L"Button", L"Back up saves", BS_PUSHBUTTON | WS_TABSTOP, X0, 372, 140, 30, ID_SAV_BACKUP);
+    add(TAB_SAVES, L"Button", L"Restore a backup...", BS_PUSHBUTTON | WS_TABSTOP, X0 + 150, 372, 150, 30, ID_SAV_RESTORE);
+    add(TAB_SAVES, L"Button", L"Open saves folder", BS_PUSHBUTTON | WS_TABSTOP, X0, 420, 140, 30, ID_SAV_OPEN);
+    add(TAB_SAVES, L"Button", L"Open backups", BS_PUSHBUTTON | WS_TABSTOP, X0 + 150, 420, 150, 30, ID_SAV_OPEN_BACKUPS);
+
+    /* Advanced: model tools */
+    add(TAB_ADVANCED, L"Static", L"Tools for character mods with a model of their own. Export a model, "
+                                 L"edit it in Blender on a story character's skeleton, and make it a mod.",
+        SS_LEFT, X0, 50, 560, 36, 0);
+    add(TAB_ADVANCED, L"Button", L"1. Export a model", BS_GROUPBOX, X0, 92, 560, 118, 0);
+    add(TAB_ADVANCED, L"Static", L"Model", SS_LEFT, X0 + 16, 118, 100, 20, 0);
+    h = add(TAB_ADVANCED, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, X0 + 120, 114, 424, 200, ID_MDL_PICK);
+    for (i = 0; i < N_MODELS; i++)
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)k_models[i].name);
+    SendMessageW(h, CB_SETCURSEL, 0, 0);
+    add(TAB_ADVANCED, L"Static", L"Hash", SS_LEFT, X0 + 16, 150, 100, 20, 0);
+    add(TAB_ADVANCED, L"Edit", L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, X0 + 120, 146, 120, 24, ID_MDL_HASH);
+    add(TAB_ADVANCED, L"Static", L"Export the base character too: its skeleton is the one to fit a new model to.",
+        SS_LEFT, X0 + 250, 150, 300, 36, 0);
+    add(TAB_ADVANCED, L"Button", L"Export (.glb)", BS_PUSHBUTTON | WS_TABSTOP, X0 + 16, 176, 140, 28, ID_MDL_EXPORT);
+    add(TAB_ADVANCED, L"Button", L"2. Make a character mod from your model", BS_GROUPBOX, X0, 220, 560, 150, 0);
+    add(TAB_ADVANCED, L"Static", L"Model (.glb)", SS_LEFT, X0 + 16, 246, 100, 20, 0);
+    add(TAB_ADVANCED, L"Edit", L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, X0 + 120, 242, 330, 24, ID_MDL_FILE);
+    add(TAB_ADVANCED, L"Button", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, X0 + 456, 241, 90, 26, ID_MDL_BROWSE);
+    add(TAB_ADVANCED, L"Static", L"Plays as", SS_LEFT, X0 + 16, 280, 100, 20, 0);
+    h = add(TAB_ADVANCED, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 120, 276, 160, 200, ID_MDL_BASE);
+    for (i = 0; i < 6; i++)
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)k_bases[i]);
+    SendMessageW(h, CB_SETCURSEL, 1, 0);
+    add(TAB_ADVANCED, L"Static", L"Name", SS_LEFT, X0 + 16, 314, 100, 20, 0);
+    add(TAB_ADVANCED, L"Edit", L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, X0 + 120, 310, 220, 24, ID_MDL_NAME);
+    add(TAB_ADVANCED, L"Button", L"Create character mod", BS_PUSHBUTTON | WS_TABSTOP, X0 + 360, 308, 186, 28, ID_MDL_CREATE);
+    add(TAB_ADVANCED, L"Static", L"The mod plays as that character - moves, spells, stake - wearing your model.",
+        SS_LEFT, X0 + 16, 342, 530, 20, 0);
+    add(TAB_ADVANCED, L"Static", L"In Blender: import the base character's .glb and yours, fit your model to its "
+                                 L"skeleton (bones posed to match, weights painted), then File > Export > glTF 2.0 (.glb).",
+        SS_LEFT, X0, 380, 560, 36, 0);
+    add(TAB_ADVANCED, L"Static", L"", SS_LEFT, X0, 420, 400, 40, ID_MDL_STATUS);
+    add(TAB_ADVANCED, L"Button", L"Open models folder", BS_PUSHBUTTON | WS_TABSTOP, X0 + 420, 420, 140, 30, ID_MDL_OPEN);
+
     /* Install */
     add(TAB_INSTALL, L"Static", L"1.  Your Buffy the Vampire Slayer: Chaos Bleeds disc image (Xbox ISO or XISO)",
         SS_LEFT, X0, 54, 560, 20, 0);
     add(TAB_INSTALL, L"Edit", L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, X0 + 20, 78, 424, 24, ID_IMAGE);
     add(TAB_INSTALL, L"Button", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, X0 + 454, 77, 92, 26, ID_IMAGE_BROWSE);
-    add(TAB_INSTALL, L"Static", L"The disc image is only read, never changed.", SS_LEFT, X0 + 20, 106, 520, 20, 0);
+    add(TAB_INSTALL, L"Static", is_wine() ? L"The disc image is only read, never changed. Linux files are on drive Z: "
+                                            L"(Z:\\home\\...)." : L"The disc image is only read, never changed.",
+        SS_LEFT, X0 + 20, 106, 540, 20, 0);
     add(TAB_INSTALL, L"Static", L"2.  Install to", SS_LEFT, X0, 138, 560, 20, 0);
     add(TAB_INSTALL, L"Edit", L"", ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, X0 + 20, 162, 424, 24, ID_TARGET);
     add(TAB_INSTALL, L"Button", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, X0 + 454, 161, 92, 26, ID_TARGET_BROWSE);
@@ -1737,6 +2513,13 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
         case ID_PLAY:
             play();
             break;
+        case ID_UPD_CHECK: update_check(1); break;
+        case ID_UPD_APPLY: update_apply(); break;
+        case ID_UPD_NOTES:
+            if (s_upd.page[0])
+                ShellExecuteW(w, L"open", s_upd.page, NULL, NULL, SW_SHOWNORMAL);
+            break;
+        case ID_UPD_AUTO: save_launcher_ini(); break;
         case ID_GAMEDIR_CHANGE: {
             WCHAR d[MAX_PATH];
             if (pick_folder(L"Choose the folder that holds the installed game", d)) {
@@ -1753,12 +2536,12 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             }
             break;
         }
-        case ID_RESOLUTION: case ID_RENDERER:
+        case ID_RESOLUTION: case ID_RENDERER: case ID_FPS_LIMIT:
             if (HIWORD(wp) == CBN_SELCHANGE)
                 s_settings_dirty = 1, set_text(ID_SETTINGS_STATUS, L"");
             break;
         case ID_WINDOWED: case ID_FULLSCREEN: case ID_VSYNC: case ID_SKIP_INTRO: case ID_WS_SAFE: case ID_INVERT_X:
-        case ID_REPORT_BTN:
+        case ID_REPORT_BTN: case ID_SHOW_FPS: case ID_OVERLAY: case ID_INTERP: case ID_PRELOAD:
             s_settings_dirty = 1;
             set_text(ID_SETTINGS_STATUS, L"");
             break;
@@ -1784,6 +2567,58 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
         }
         case ID_TEX_OPEN_DUMP: tex_open(L"dump"); break;
         case ID_TEX_REFRESH: tex_refresh(); break;
+        case ID_MDL_EXPORT: mdl_export(); break;
+        case ID_MDL_BROWSE: mdl_browse(); break;
+        case ID_MDL_CREATE: mdl_create(); break;
+        case ID_SAV_BACKUP: sav_backup(); break;
+        case ID_CTL_CHANGE: ctl_start_capture(0); break;
+        case ID_CTL_SECOND: ctl_start_capture(1); break;
+        case ID_CTL_CLEAR: {
+            int sel = (int)SendMessageW(ctl(ID_CTL_LIST), LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+            if (sel >= 0) {
+                s_ctl_bind[sel][0] = 0;
+                ctl_show();
+                set_text(ID_CTL_STATUS, L"Cleared. Save to keep it.");
+            }
+            break;
+        }
+        case ID_CTL_RESET: {
+            int i;
+            for (i = 0; i < N_CTL_ACTIONS; i++)
+                wcscpy_s(s_ctl_bind[i], 64, k_ctl_actions[i].def);
+            CheckDlgButton(s_wnd, ID_CTL_MOUSELOOK, BST_CHECKED);
+            CheckDlgButton(s_wnd, ID_CTL_INVERTY, BST_UNCHECKED);
+            SendMessageW(ctl(ID_CTL_SENS), TBM_SETPOS, TRUE, 10);
+            ctl_show();
+            set_text(ID_CTL_STATUS, L"Back to the default keys. Save to keep them.");
+            break;
+        }
+        case ID_CTL_SAVE: ctl_save(); break;
+        case ID_SAV_RESTORE: sav_restore(); break;
+        case ID_SAV_OPEN:
+        case ID_SAV_OPEN_BACKUPS: {
+            WCHAR d[MAX_PATH];
+            if (!is_game_folder(s_game_dir))
+                break;
+            swprintf_s(d, MAX_PATH, LOWORD(wp) == ID_SAV_OPEN ? L"%s\\UDATA\\" SAVE_TITLE : L"%s\\SaveBackups", s_game_dir);
+            CreateDirectoryW(d, NULL);
+            ShellExecuteW(s_wnd, L"open", d, NULL, NULL, SW_SHOWNORMAL);
+            break;
+        }
+        case ID_MDL_PICK:
+            if (HIWORD(wp) == CBN_SELCHANGE)
+                mdl_refresh();
+            break;
+        case ID_MDL_OPEN: {
+            WCHAR d[MAX_PATH];
+            if (!is_game_folder(s_game_dir))
+                break;
+            models_dir(d, L"export");
+            mkdirs(d);
+            models_dir(d, NULL);
+            ShellExecuteW(w, L"open", d, NULL, NULL, SW_SHOWNORMAL);
+            break;
+        }
         case ID_MOD_UP: mods_move(-1); break;
         case ID_MOD_DOWN: mods_move(1); break;
         case ID_MOD_REFRESH: mods_scan(); break;
@@ -1885,6 +2720,21 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
         free(msg);
         break;
     }
+    case WM_APP_EXPORTEND:
+        mdl_export_done((DWORD)wp);
+        return 0;
+    case WM_APP_UPDCHECK:
+        update_checked((UpdateInfo *)lp);
+        return 0;
+    case WM_APP_UPDPROG:
+        if (lp) {
+            set_text(ID_UPD_STATUS, (WCHAR *)lp);
+            free((void *)lp);
+        }
+        return 0;
+    case WM_APP_UPDDONE:
+        update_done((int)wp, (WCHAR *)lp);
+        return 0;
     case WM_APP_GAMEEND:
         if (wp != 0 && wp != 1) {
             WCHAR t[300];
@@ -1922,11 +2772,16 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
         SelectObject(dc, s_font);
         tr.top = S(34);
         tr.bottom = S(56);
-        DrawTextW(dc, L"PC launcher", -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        DrawTextW(dc, on_steam_deck() ? L"PC launcher  \x00B7  Steam Deck" : is_wine() ? L"PC launcher  \x00B7  Linux (Wine / Proton)"
+                                                                               : L"PC launcher",
+                  -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         EndPaint(w, &ps);
         return 0;
     }
     case WM_CLOSE:
+        if (s_upd_busy && MessageBoxW(w, L"An update is running. Stop it and close?", GAME_TITLE,
+                                      MB_YESNO | MB_ICONQUESTION) != IDYES)
+            return 0;
         if (s_busy && MessageBoxW(w, L"Stop the installation and close?", GAME_TITLE, MB_YESNO | MB_ICONQUESTION) != IDYES)
             return 0;
         InterlockedExchange(&s_cancel, 1);
@@ -2007,6 +2862,26 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
         *slash = 0;
     join(s_launcher_ini, s_launcher_dir, L"launcher.ini");
     load_launcher_ini();
+    update_cleanup();               /* files the last update moved aside */
+
+    /* --update [--check]: update from GitHub without a window (tests); exit
+     * code 0 updated / up to date, 2 an update is there (--check), 1 failed. */
+    if (argc >= 2 && !wcscmp(argv[1], L"--update")) {
+        UpdateInfo u;
+        update_check_run(&u);
+        fwprintf(stderr, L"this %s, newest %s%s%s\n", port_version(), u.version[0] ? u.version : L"-",
+                 u.newer ? L" (newer)" : L"", u.error[0] ? u.error : L"");
+        if (!u.ok)
+            return 1;
+        if (!u.newer || (argc >= 3 && !wcscmp(argv[2], L"--check")))
+            return u.newer ? 2 : 0;
+        if (!update_apply_run(&u)) {
+            fwprintf(stderr, L"update failed: %s\n", s_upd_err);
+            return 1;
+        }
+        fwprintf(stderr, L"updated to %s\n", u.version);
+        return 0;
+    }
 
     /* --icon <folder>: give that folder's game exe its icon (tests). */
     if (argc >= 3 && !wcscmp(argv[1], L"--icon")) {
@@ -2027,7 +2902,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
         }
     }
     if (argc >= 4 && !wcscmp(argv[1], L"--capture")) {
-        static const WCHAR *names[] = { L"play", L"settings", L"mods", L"textures", L"install" };
+        static const WCHAR *names[TAB_COUNT] = { L"play", L"settings", L"controls", L"mods", L"textures", L"saves", L"advanced", L"install" };
         int i;
         for (i = 0; i < TAB_COUNT; i++)
             if (!_wcsicmp(argv[2], names[i]))
@@ -2036,7 +2911,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     }
 
     icc.dwSize = sizeof icc;
-    icc.dwICC = ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES;
+    icc.dwICC = ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
     s_dpi = (int)GetDpiForSystem();
     ncm.cbSize = sizeof ncm;
@@ -2056,14 +2931,31 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     wc.lpszClassName = L"BuffyLauncher";
     wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     RegisterClassExW(&wc);
-    r.left = 0; r.top = 0; r.right = S(620); r.bottom = S(490 + DY);
+    r.left = 0; r.top = 0; r.right = S(620); r.bottom = S(610 + DY);
     AdjustWindowRectExForDpi(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0, (UINT)s_dpi);
     s_wnd = CreateWindowExW(0, wc.lpszClassName, GAME_TITLE L" - Launcher",
-                            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
+                            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                             CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL, inst, NULL);
     build_ui();
     refresh_play();                 /* also loads the game's icon for the header */
     show_tab(capture_tab >= 0 ? capture_tab : (is_game_folder(s_game_dir) ? TAB_PLAY : TAB_INSTALL));
+    update_show();
+    if (capture_file) {
+        /* (tests) BUFFY_LAUNCHER_TEST_UPDATE=1: the check's answer in the picture */
+        WCHAR v[8];
+        if (GetEnvironmentVariableW(L"BUFFY_LAUNCHER_TEST_UPDATE", v, 8)) {
+            UpdateInfo u;
+            update_check_run(&u);
+            s_upd = u;
+            update_show();
+        }
+    } else if (argc >= 2 && !wcscmp(argv[1], L"--updated")) {
+        WCHAR t[128];
+        swprintf_s(t, 128, L"Updated to version %s.", port_version());
+        set_text(ID_UPD_STATUS, t);
+    } else if (IsDlgButtonChecked(s_wnd, ID_UPD_AUTO) == BST_CHECKED) {
+        update_check(0);
+    }
     ShowWindow(s_wnd, show);
     UpdateWindow(s_wnd);
     if (capture_file) {
@@ -2074,10 +2966,49 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
                 TranslateMessage(&pm);
                 DispatchMessageW(&pm);
             }
+        {
+            /* (tests) BUFFY_LAUNCHER_TEST_BACKUP=1 / _RESTORE=<backup folder>:
+             * the Saves page's actions, before the picture */
+            WCHAR v[MAX_PATH];
+            if (GetEnvironmentVariableW(L"BUFFY_LAUNCHER_TEST_TABS", v, MAX_PATH)) {
+                /* (tests) visit tabs by number first: "7,0" Install then Play */
+                WCHAR *q = v;
+                while (*q) {
+                    int tab = _wtoi(q);
+                    if (tab >= 0 && tab < TAB_COUNT) {
+                        show_tab(tab);
+                        t0 = GetTickCount();
+                        while (GetTickCount() - t0 < 300)
+                            while (PeekMessageW(&pm, NULL, 0, 0, PM_REMOVE)) {
+                                TranslateMessage(&pm);
+                                DispatchMessageW(&pm);
+                            }
+                    }
+                    while (*q && *q != L',')
+                        q++;
+                    if (*q == L',')
+                        q++;
+                }
+            }
+            if (GetEnvironmentVariableW(L"BUFFY_LAUNCHER_TEST_BACKUP", v, MAX_PATH))
+                sav_backup();
+            if (GetEnvironmentVariableW(L"BUFFY_LAUNCHER_TEST_RESTORE", v, MAX_PATH))
+                sav_restore_from(v, 0);
+            if (capture_tab == TAB_SAVES) {
+                t0 = GetTickCount();
+                while (GetTickCount() - t0 < 200)
+                    while (PeekMessageW(&pm, NULL, 0, 0, PM_REMOVE)) {
+                        TranslateMessage(&pm);
+                        DispatchMessageW(&pm);
+                    }
+            }
+        }
         capture(capture_file);
         return 0;
     }
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (ctl_capture_msg(&msg))
+            continue;                               /* (a key for the Controls page) */
         if (!IsDialogMessageW(s_wnd, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

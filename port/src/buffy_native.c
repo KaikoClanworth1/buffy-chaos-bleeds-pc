@@ -799,10 +799,14 @@ void D3DDevice_Clear_0013A350(void)
     {
         NativeTarget tg;
         if (s_mode == 1 && target_now(&tg)) {
-            if (flags & 0xF0) {
+            {
+                void nv2a_native_interp_clear(ID3D11RenderTargetView *rtv, UINT flags, const float c[4], float z, UINT8 stencil);
                 float c[4] = { ((color >> 16) & 255) / 255.0f, ((color >> 8) & 255) / 255.0f,
                                (color & 255) / 255.0f, (color >> 24) / 255.0f };
-                ID3D11DeviceContext_ClearRenderTargetView(s_ctx, tg.rtv, c);
+                if (flags & 0xF0)
+                    ID3D11DeviceContext_ClearRenderTargetView(s_ctx, tg.rtv, c);
+                if (flags & 0xF3)
+                    nv2a_native_interp_clear(tg.rtv, flags, c, z, (UINT8)MEM32(g_esp + 24));
             }
             if ((flags & 3) && tg.dsv)
                 ID3D11DeviceContext_ClearDepthStencilView(s_ctx, tg.dsv,
@@ -816,12 +820,80 @@ void D3DDevice_Clear_0013A350(void)
 /* At D3DDevice_Swap (buffy_frame.c): show the native frame. */
 double g_native_present_ms;                 /* the last present, for BUFFY_NATIVE_FRAMELOG */
 
+/* Frame interpolation: on when asked for, in one window (co-op's second
+ * window and split screen show every frame as they are), and where a frame
+ * between can be seen -- vsync off, or a display at 100 Hz or more. */
+void nv2a_native_interp_setup(int on, ID3D11RenderTargetView *main_rtv);
+int  nv2a_native_interp_render(float t, ID3D11Texture2D *main_tex, ID3D11Texture2D **out_tex, ID3D11ShaderResourceView **out_srv);
+void nv2a_native_interp_frame_end(void);
+void nv2a_gpu_native_present_extra(ID3D11Texture2D *tex, ID3D11ShaderResourceView *srv, uint32_t w, uint32_t h, uint32_t pw, uint32_t ph);
+int  nv2a_gpu_vsync(void);
+int  nv2a_gpu_has_second_window(void);
+int  buffy_settings_frame_interpolation(void);
+
+static LARGE_INTEGER s_last_real;          /* the last real frame's present */
+int buffy_settings_fps_limit(void);
+
+static int interp_active(void)
+{
+    static int hz = -1;
+    if (!buffy_settings_frame_interpolation() || nv2a_gpu_has_second_window())
+        return 0;
+    if (hz < 0) {
+        DEVMODEW dm;
+        memset(&dm, 0, sizeof dm);
+        dm.dmSize = sizeof dm;
+        hz = EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) ? (int)dm.dmDisplayFrequency : 60;
+        fprintf(stderr, "[NATIVE] frame interpolation: display at %d Hz%s\n", hz,
+                hz < 100 ? " (with vsync on it only shows with vsync off)" : "");
+    }
+    return !nv2a_gpu_vsync() || hz >= 100 || getenv("BUFFY_INTERP");
+}
+
+/* Wait `ms` (the half frame before the real frame, vsync off). */
+static void wait_ms(double ms)
+{
+    LARGE_INTEGER f, a, b;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    if (ms > 2.0)
+        Sleep((DWORD)(ms - 1.5));
+    do
+        QueryPerformanceCounter(&b);
+    while ((double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart < ms);
+}
+
 void buffy_native_present(void)
 {
+    int interp;
     if (s_mode != 1 || !fb_ready())
         return;
     s_backbuffer = s_cur_rt;               /* what is shown is the back buffer */
     s_vp_dirty = 1;
+    interp = interp_active();
+    if (interp) {
+        /* the in-between frame half a frame after the last real one, the real
+         * one a frame after it -- or at once when the work ran past that
+         * (the frame in between never holds the game back) */
+        ID3D11Texture2D *it = NULL;
+        ID3D11ShaderResourceView *isrv = NULL;
+        LARGE_INTEGER f, now;
+        double since, frame_ms = buffy_settings_fps_limit() == 30 ? 33.333 : 16.667;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&now);
+        since = s_last_real.QuadPart ? (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart : 1e9;
+        if (since < 200.0 && nv2a_native_interp_render(0.5f, s_fb.tex, &it, &isrv)) {
+            if (!nv2a_gpu_vsync() && since < frame_ms * 0.5)
+                wait_ms(frame_ms * 0.5 - since);
+            nv2a_gpu_native_present_extra(it, isrv, 640, 480, s_fb.pw, s_fb.ph);
+            if (!nv2a_gpu_vsync()) {
+                QueryPerformanceCounter(&now);
+                since = (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart;
+                if (since < frame_ms - 0.5)
+                    wait_ms(frame_ms - 0.5 - since);
+            }
+        }
+    }
     {
         LARGE_INTEGER f, a, b;
         QueryPerformanceFrequency(&f);
@@ -832,6 +904,9 @@ void buffy_native_present(void)
         QueryPerformanceCounter(&b);
         g_native_present_ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart;
     }
+    QueryPerformanceCounter(&s_last_real);                /* (the in-between frame's clock) */
+    nv2a_native_interp_frame_end();
+    nv2a_native_interp_setup(interp, s_fb.rtv);          /* (the next frame is recorded for it) */
     if (log_on()) {
         static DWORD last;
         if (GetTickCount() - last >= 2000) {

@@ -228,6 +228,15 @@ void buffy_input_menu_ready(void)
     InterlockedCompareExchange(&s_menu_ready, (LONG)GetTickCount() | 1, 0);
 }
 
+/* (testing) BUFFY_PAD_LEVEL_CLOCK=1: the second scripts count from the first
+ * level's start (player 1 made), loads taking what they take */
+static volatile LONG s_level_ready;
+
+void buffy_input_level_ready(void)
+{
+    InterlockedCompareExchange(&s_level_ready, (LONG)GetTickCount() | 1, 0);
+}
+
 static int parse_script(const char *s, PadEvent *ev, int max)
 {
     int nev = 0;
@@ -260,8 +269,15 @@ static void run_events(XBOX_GAMEPAD *g, const PadEvent *ev, int nev, DWORD rel)
             apply_button(g, ev[k].name);
 }
 
+/* Testing: a button held on player 1's pad for the tests in buffy_mods.c. */
+const char *volatile g_test_button;
+
+int buffy_mouse_look_allowed(void);
+
 static void apply_script(int port, XBOX_GAMEPAD *g)
 {
+    if (port == 0 && g_test_button)
+        apply_button(g, g_test_button);
     static int inited, n1, n2, np2;
     static PadEvent e1[64], e2[64], ep2[64];
     static DWORD t0;
@@ -275,6 +291,20 @@ static void apply_script(int port, XBOX_GAMEPAD *g)
         np2 = parse_script(getenv("BUFFY_PAD2_SCRIPT"), ep2, 64);
     }
     menu = s_menu_ready;
+    if (getenv("BUFFY_PAD_LEVEL_CLOCK")) {
+        menu = s_level_ready;
+        if (atoi(getenv("BUFFY_PAD_LEVEL_CLOCK")) == 2) {
+            /* =2: from when play has run for two seconds (cutscenes over) */
+            static int since;
+            static LONG play_ready;
+            if (!play_ready) {
+                since = buffy_mouse_look_allowed() ? since + 1 : 0;
+                if (since > 120)
+                    play_ready = (LONG)GetTickCount() | 1;
+            }
+            menu = play_ready;
+        }
+    }
     if (port == 1) {
         if (np2 && menu)
             run_events(g, ep2, np2, GetTickCount() - (DWORD)menu);
@@ -290,32 +320,243 @@ static void apply_script(int port, XBOX_GAMEPAD *g)
         run_events(g, e2, n2, GetTickCount() - (DWORD)menu);
 }
 
+/* ── keyboard and mouse ───────────────────────────────────────────────────
+ *
+ * Player 1's pad also takes the keyboard and mouse while the game window has
+ * focus. Every pad input is an action with up to two keys, from [Keys] in
+ * buffy_settings.ini (the launcher's Controls tab writes it):
+ *     Jump = Space, MouseMiddle        (names: see k_key_names)
+ * Mouse look: while playing (not in a menu, the pause or a cutscene -- the
+ * game says through buffy_mouse_look_allowed) the cursor is hidden and kept in
+ * the window and its movement turns the camera, as the right stick does
+ * ([Controls] MouseLook, MouseSensitivity, MouseInvertY). */
+enum {
+    ACT_A, ACT_B, ACT_X, ACT_Y, ACT_BLACK, ACT_WHITE, ACT_LT, ACT_RT, ACT_START, ACT_BACK,
+    ACT_DUP, ACT_DDOWN, ACT_DLEFT, ACT_DRIGHT,
+    ACT_MOVE_UP, ACT_MOVE_DOWN, ACT_MOVE_LEFT, ACT_MOVE_RIGHT,
+    ACT_LOOK_UP, ACT_LOOK_DOWN, ACT_LOOK_LEFT, ACT_LOOK_RIGHT,
+    ACT_LSTICK, ACT_RSTICK, ACT_COUNT
+};
+/* the [Keys] names (also the launcher's), and the defaults */
+static const struct { const char *name, *def; } k_actions[ACT_COUNT] = {
+    { "A", "Space" }, { "B", "Backspace, MouseMiddle" }, { "X", "E, MouseLeft" }, { "Y", "Q, MouseRight" },
+    { "Black", "Z" }, { "White", "C" }, { "LeftTrigger", "LShift" }, { "RightTrigger", "F, RShift" },
+    { "Start", "Enter" }, { "Back", "Escape" },
+    { "DpadUp", "Up" }, { "DpadDown", "Down" }, { "DpadLeft", "Left, WheelDown" }, { "DpadRight", "Right, WheelUp" },
+    { "MoveForward", "W" }, { "MoveBack", "S" }, { "MoveLeft", "A" }, { "MoveRight", "D" },
+    { "LookUp", "I" }, { "LookDown", "K" }, { "LookLeft", "J" }, { "LookRight", "L" },
+    { "LeftStickClick", "LCtrl" }, { "RightStickClick", "V" },
+};
+#define KEY_WHEEL_UP   0x1001
+#define KEY_WHEEL_DOWN 0x1002
+static const struct { const char *name; int vk; } k_key_names[] = {
+    { "Space", VK_SPACE }, { "Enter", VK_RETURN }, { "Escape", VK_ESCAPE }, { "Backspace", VK_BACK }, { "Tab", VK_TAB },
+    { "LShift", VK_LSHIFT }, { "RShift", VK_RSHIFT }, { "LCtrl", VK_LCONTROL }, { "RCtrl", VK_RCONTROL },
+    { "LAlt", VK_LMENU }, { "RAlt", VK_RMENU }, { "Up", VK_UP }, { "Down", VK_DOWN }, { "Left", VK_LEFT }, { "Right", VK_RIGHT },
+    { "Insert", VK_INSERT }, { "Delete", VK_DELETE }, { "Home", VK_HOME }, { "End", VK_END }, { "PageUp", VK_PRIOR },
+    { "PageDown", VK_NEXT }, { "CapsLock", VK_CAPITAL },
+    { "MouseLeft", VK_LBUTTON }, { "MouseRight", VK_RBUTTON }, { "MouseMiddle", VK_MBUTTON }, { "Mouse4", VK_XBUTTON1 },
+    { "Mouse5", VK_XBUTTON2 }, { "WheelUp", KEY_WHEEL_UP }, { "WheelDown", KEY_WHEEL_DOWN },
+    { "Num0", VK_NUMPAD0 }, { "Num1", VK_NUMPAD1 }, { "Num2", VK_NUMPAD2 }, { "Num3", VK_NUMPAD3 }, { "Num4", VK_NUMPAD4 },
+    { "Num5", VK_NUMPAD5 }, { "Num6", VK_NUMPAD6 }, { "Num7", VK_NUMPAD7 }, { "Num8", VK_NUMPAD8 }, { "Num9", VK_NUMPAD9 },
+    { "F1", VK_F1 }, { "F2", VK_F2 }, { "F3", VK_F3 }, { "F4", VK_F4 }, { "F5", VK_F5 }, { "F6", VK_F6 }, { "F7", VK_F7 },
+    { "F8", VK_F8 }, { "F9", VK_F9 }, { "F10", VK_F10 }, { "F12", VK_F12 },
+    { ";", VK_OEM_1 }, { "=", VK_OEM_PLUS }, { ",", VK_OEM_COMMA }, { "-", VK_OEM_MINUS }, { ".", VK_OEM_PERIOD },
+    { "/", VK_OEM_2 }, { "`", VK_OEM_3 }, { "[", VK_OEM_4 }, { "\\", VK_OEM_5 }, { "]", VK_OEM_6 }, { "'", VK_OEM_7 },
+};
+static int   s_bind[ACT_COUNT][2];
+static int   s_mouse_look = 1, s_mouse_invert_y;
+static float s_mouse_sens = 1.0f;
+
+static int key_code(const char *n)
+{
+    size_t i;
+    if (n[0] && !n[1] && ((n[0] >= 'A' && n[0] <= 'Z') || (n[0] >= '0' && n[0] <= '9')))
+        return n[0];
+    if (n[0] && !n[1] && n[0] >= 'a' && n[0] <= 'z')
+        return n[0] - 32;
+    for (i = 0; i < sizeof k_key_names / sizeof k_key_names[0]; i++)
+        if (!_stricmp(n, k_key_names[i].name))
+            return k_key_names[i].vk;
+    return 0;
+}
+
+static void parse_binding(const char *v, int *out)
+{
+    char buf[128], *tok, *ctx = NULL;
+    int n = 0;
+    out[0] = out[1] = 0;
+    strncpy_s(buf, sizeof buf, v, _TRUNCATE);
+    for (tok = strtok_s(buf, ",", &ctx); tok && n < 2; tok = strtok_s(NULL, ",", &ctx)) {
+        while (*tok == ' ')
+            tok++;
+        {
+            size_t l = strlen(tok);
+            while (l && tok[l - 1] == ' ')
+                tok[--l] = 0;
+        }
+        if ((out[n] = key_code(tok)) != 0)
+            n++;
+    }
+}
+
+const char *buffy_settings_path(void);
+
+static void load_bindings(void)
+{
+    static int loaded;
+    const char *ini = buffy_settings_path();
+    int a;
+    char v[128];
+    if (loaded || !ini || !ini[0])
+        return;
+    loaded = 1;
+    for (a = 0; a < ACT_COUNT; a++) {
+        GetPrivateProfileStringA("Keys", k_actions[a].name, k_actions[a].def, v, sizeof v, ini);
+        parse_binding(v, s_bind[a]);
+    }
+    s_mouse_look = GetPrivateProfileIntA("Controls", "MouseLook", 1, ini) != 0;
+    s_mouse_invert_y = GetPrivateProfileIntA("Controls", "MouseInvertY", 0, ini) != 0;
+    GetPrivateProfileStringA("Controls", "MouseSensitivity", "1.0", v, sizeof v, ini);
+    s_mouse_sens = (float)atof(v);
+    if (!(s_mouse_sens > 0.05f && s_mouse_sens < 20.0f))
+        s_mouse_sens = 1.0f;
+    if (getenv("BUFFY_MOUSE_LOG"))
+        for (a = 0; a < ACT_COUNT; a++)
+            fprintf(stderr, "[INPUT] key %s = %X %X\n", k_actions[a].name, s_bind[a][0], s_bind[a][1]);
+}
+
+/* The wheel this frame: notches up (+) / down (-), taken once a frame. */
+int nv2a_gpu_take_wheel(void);
+static int s_wheel_frame;
+
+static int bound(int a, int captured)
+{
+    int k;
+    for (k = 0; k < 2; k++) {
+        int c = s_bind[a][k];
+        if (!c)
+            continue;
+        if (c == KEY_WHEEL_UP ? s_wheel_frame > 0 : c == KEY_WHEEL_DOWN ? s_wheel_frame < 0 : 0)
+            return 1;
+        if (c == VK_LBUTTON || c == VK_RBUTTON || c == VK_MBUTTON || c == VK_XBUTTON1 || c == VK_XBUTTON2) {
+            if (captured && key(c))              /* (mouse buttons only while playing) */
+                return 1;
+            continue;
+        }
+        if (c < 0x1000 && key(c))
+            return 1;
+    }
+    return 0;
+}
+
+int  buffy_mouse_look_allowed(void);
+void nv2a_gpu_mouse_capture(int on);
+int  nv2a_gpu_mouse_captured(int *cx, int *cy);
+
+static SHORT stick_max(SHORT a, int b)
+{
+    if (b > 32767) b = 32767;
+    if (b < -32768) b = -32768;
+    return (abs(b) > abs((int)a)) ? (SHORT)b : a;
+}
+
 static void apply_keyboard(XBOX_GAMEPAD *g)
 {
-    if (!game_has_focus())
+    static DWORD last_poll;
+    static int mdx, mdy;
+    int cap = 0, cx, cy, focus = game_has_focus();
+    load_bindings();
+    /* the mouse: captured while playing; its movement once a frame */
+    {
+        /* (playing for half a second: not the moment a level is made) */
+        static DWORD since;
+        int ok = focus && s_mouse_look && buffy_mouse_look_allowed();
+        if (!ok)
+            since = 0;
+        else if (!since)
+            since = GetTickCount();
+        nv2a_gpu_mouse_capture(ok && GetTickCount() - since >= 500);
+    }
+    if (GetTickCount() - last_poll >= 8) {
+        last_poll = GetTickCount();
+        s_wheel_frame = nv2a_gpu_take_wheel();
+        mdx = mdy = 0;
+        if (nv2a_gpu_mouse_captured(&cx, &cy)) {
+            POINT p;
+            if (GetCursorPos(&p)) {
+                mdx = p.x - cx;
+                mdy = p.y - cy;
+                SetCursorPos(cx, cy);
+            }
+        }
+    }
+    cap = nv2a_gpu_mouse_captured(&cx, &cy);
+    {
+        /* (testing) BUFFY_TEST_MOUSE=secs:dx:holdsecs -- the mouse moving dx
+         * a frame for a while, as if captured; BUFFY_MOUSE_LOG: when mouse
+         * look would be on */
+        static DWORD t0;
+        const char *tm = getenv("BUFFY_TEST_MOUSE");
+        if (!t0)
+            t0 = GetTickCount();
+        if (getenv("BUFFY_MOUSE_LOG")) {
+            static int was = -1;
+            int now = buffy_mouse_look_allowed();
+            if (now != was)
+                fprintf(stderr, "[INPUT] mouse look %s (t %.1f)\n", now ? "allowed" : "off", (GetTickCount() - t0) / 1000.0);
+            was = now;
+        }
+        if (tm && buffy_mouse_look_allowed()) {
+            double at = atof(tm), hold = 1;
+            const char *q = strchr(tm, ':');
+            int dx = q ? atoi(q + 1) : 0;
+            if (q && (q = strchr(q + 1, ':')) != NULL)
+                hold = atof(q + 1);
+            if ((GetTickCount() - t0) / 1000.0 >= at && (GetTickCount() - t0) / 1000.0 < at + hold) {
+                mdx = dx;
+                mdy = 0;
+                cap = 1;
+                focus = 1;
+            }
+        }
+    }
+    if (!focus)
         return;
-    if (key(VK_RETURN))                 g->wButtons |= BTN_START;
-    if (key(VK_ESCAPE))                 g->wButtons |= BTN_BACK;
-    if (key(VK_UP))                     g->wButtons |= BTN_UP;
-    if (key(VK_DOWN))                   g->wButtons |= BTN_DOWN;
-    if (key(VK_LEFT))                   g->wButtons |= BTN_LEFT;
-    if (key(VK_RIGHT))                  g->wButtons |= BTN_RIGHT;
-    if (key(VK_SPACE))                  g->bAnalogButtons[0] = 0xFF;   /* A */
-    if (key(VK_BACK))                   g->bAnalogButtons[1] = 0xFF;   /* B */
-    if (key('E'))                       g->bAnalogButtons[2] = 0xFF;   /* X */
-    if (key('Q'))                       g->bAnalogButtons[3] = 0xFF;   /* Y */
-    if (key('Z'))                       g->bAnalogButtons[4] = 0xFF;   /* Black */
-    if (key('C'))                       g->bAnalogButtons[5] = 0xFF;   /* White */
-    if (key(VK_LSHIFT))                 g->bAnalogButtons[6] = 0xFF;   /* L trigger */
-    if (key(VK_RSHIFT) || key('F'))     g->bAnalogButtons[7] = 0xFF;   /* R trigger */
-    if (key('W')) g->sThumbLY = 32767;
-    if (key('S')) g->sThumbLY = -32768;
-    if (key('A')) g->sThumbLX = -32768;
-    if (key('D')) g->sThumbLX = 32767;
-    if (key('I')) g->sThumbRY = 32767;
-    if (key('K')) g->sThumbRY = -32768;
-    if (key('J')) g->sThumbRX = -32768;
-    if (key('L')) g->sThumbRX = 32767;
+    if (bound(ACT_START, cap))      g->wButtons |= BTN_START;
+    if (bound(ACT_BACK, cap))       g->wButtons |= BTN_BACK;
+    if (bound(ACT_DUP, cap))        g->wButtons |= BTN_UP;
+    if (bound(ACT_DDOWN, cap))      g->wButtons |= BTN_DOWN;
+    if (bound(ACT_DLEFT, cap))      g->wButtons |= BTN_LEFT;
+    if (bound(ACT_DRIGHT, cap))     g->wButtons |= BTN_RIGHT;
+    if (bound(ACT_LSTICK, cap))     g->wButtons |= 0x0040;             /* left thumb */
+    if (bound(ACT_RSTICK, cap))     g->wButtons |= 0x0080;             /* right thumb */
+    if (bound(ACT_A, cap))          g->bAnalogButtons[0] = 0xFF;
+    if (bound(ACT_B, cap))          g->bAnalogButtons[1] = 0xFF;
+    if (bound(ACT_X, cap))          g->bAnalogButtons[2] = 0xFF;
+    if (bound(ACT_Y, cap))          g->bAnalogButtons[3] = 0xFF;
+    if (bound(ACT_BLACK, cap))      g->bAnalogButtons[4] = 0xFF;
+    if (bound(ACT_WHITE, cap))      g->bAnalogButtons[5] = 0xFF;
+    if (bound(ACT_LT, cap))         g->bAnalogButtons[6] = 0xFF;
+    if (bound(ACT_RT, cap))         g->bAnalogButtons[7] = 0xFF;
+    if (bound(ACT_MOVE_UP, cap))    g->sThumbLY = 32767;
+    if (bound(ACT_MOVE_DOWN, cap))  g->sThumbLY = -32768;
+    if (bound(ACT_MOVE_LEFT, cap))  g->sThumbLX = -32768;
+    if (bound(ACT_MOVE_RIGHT, cap)) g->sThumbLX = 32767;
+    if (bound(ACT_LOOK_UP, cap))    g->sThumbRY = 32767;
+    if (bound(ACT_LOOK_DOWN, cap))  g->sThumbRY = -32768;
+    if (bound(ACT_LOOK_LEFT, cap))  g->sThumbRX = -32768;
+    if (bound(ACT_LOOK_RIGHT, cap)) g->sThumbRX = 32767;
+    if (cap && (mdx || mdy)) {
+        /* the camera turns as fast as the mouse moves: a stick tilt for this
+         * frame's movement, past the game's stick dead zone */
+        float k = 700.0f * s_mouse_sens;
+        int rx = (int)(mdx * k), ry = (int)(-mdy * k) * (s_mouse_invert_y ? -1 : 1);
+        if (rx) rx += rx > 0 ? 6000 : -6000;
+        if (ry) ry += ry > 0 ? 6000 : -6000;
+        g->sThumbRX = stick_max(g->sThumbRX, rx);
+        g->sThumbRY = stick_max(g->sThumbRY, ry);
+    }
 }
 
 /* Radial deadzone with rescale, so a resting stick reads zero and full tilt
@@ -377,10 +618,13 @@ uint16_t buffy_input_buttons(int port)
         apply_keyboard(&g);
     apply_script(port, &g);
     return (uint16_t)(g.wButtons | (g.bAnalogButtons[0] > 0x40 ? 0x1000 : 0)
-                      | (g.bAnalogButtons[1] > 0x40 ? 0x2000 : 0));
+                      | (g.bAnalogButtons[1] > 0x40 ? 0x2000 : 0)
+                      | (g.bAnalogButtons[2] > 0x40 ? 0x4000 : 0)
+                      | (g.bAnalogButtons[3] > 0x40 ? 0x8000 : 0));
 }
 
 int buffy_coop_owns_back(void);
+int buffy_coop_owns_x(int port);
 int buffy_settings_invert_camera_x(void);
 
 /* DWORD XInputGetState(HANDLE, PXINPUT_STATE) -- 0x0018FAFA */
@@ -405,6 +649,8 @@ void XInputGetState_0018FAFA(void)
         g.sThumbRX = g.sThumbRX == -32768 ? 32767 : (SHORT)-g.sThumbRX;
     if (port == 1 && buffy_coop_owns_back())
         g.wButtons &= (WORD)~BTN_BACK;              /* story co-op: Back brings player 2 to player 1 */
+    if (buffy_coop_owns_x(port))
+        g.bAnalogButtons[2] = 0;                    /* the in-level Character Select: X changes the outfit */
 
     if (memcmp(&g, &last[port], sizeof g)) {
         packet[port]++;

@@ -42,7 +42,10 @@ static void pace_60hz(void)
     }
     if (!on)
         return;
-    period = freq.QuadPart / 60;
+    {
+        int buffy_settings_fps_limit(void);
+        period = freq.QuadPart / (buffy_settings_fps_limit() == 30 ? 30 : 60);
+    }
     QueryPerformanceCounter(&now);
     if (!next.QuadPart || now.QuadPart >= next.QuadPart) {
         /* On time or late: no wait, and no catching up afterwards either --
@@ -175,8 +178,11 @@ void buffy_frame_note_swap(void)
     {
         static int mem;
         void buffy_memstats_start(void);
-        if (!mem++)
+        if (!mem++) {
+            void buffy_preload_start(void);
             buffy_memstats_start();
+            buffy_preload_start();          /* (the disc's archives into the file cache) */
+        }
     }
     if (!s_game_thread && getenv("BUFFY_STALLS")) {
         DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),

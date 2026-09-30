@@ -10,6 +10,11 @@ cmake_minimum_required(VERSION 3.20)
 
 project(buffy_chaos_bleeds C)
 
+# The release version: the launcher compares it with the newest release on
+# GitHub (its updater), and tools/package.sh names the zip after it. Raise it
+# for each release, matching the release tag (v0.3.0).
+set(BUFFY_VERSION "0.3.0")
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -52,7 +57,12 @@ set(GAME_SOURCES
     src/buffy_menu.c
     src/buffy_gpuwait.c
     src/buffy_mods.c
+    src/buffy_sfxtrace.c
+    src/buffy_export.c
+    src/buffy_import.c
+    src/buffy_preload.c
     src/buffy_debug.c
+    src/buffy_platform.c
     src/buffy_native.c
 )
 
@@ -78,9 +88,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 # -- Launcher ("Buffy Launcher.exe"): install from the disc image, settings, mods
-add_executable(buffy_launcher WIN32 launcher/buffy_launcher.c)
+add_executable(buffy_launcher WIN32 launcher/buffy_launcher.c launcher/unzip.c)
 set_target_properties(buffy_launcher PROPERTIES OUTPUT_NAME "Buffy Launcher")
-target_compile_definitions(buffy_launcher PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(buffy_launcher PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS BUFFY_VERSION="${BUFFY_VERSION}")
 if(MSVC)
     target_link_options(buffy_launcher PRIVATE /ENTRY:wWinMainCRTStartup)
 endif()

@@ -47,6 +47,8 @@ It also adds:
 - [Screenshots](#screenshots)
 - [What you need](#what-you-need)
 - [Install and play](#install-and-play)
+- [Updates](#updates)
+- [Steam Deck and Linux (Proton)](#steam-deck-and-linux-proton)
 - [Controls](#controls)
 - [Settings](#settings)
 - [Mods: what each one does](#mods-what-each-one-does)
@@ -64,7 +66,7 @@ It also adds:
 | | |
 |---|---|
 | 💿 **The game** | A disc image of your own *Chaos Bleeds* **Xbox** disc, as an `.iso` or `.xiso`. The PS2 and GameCube versions won't work. |
-| 🖥️ **PC** | Windows 10 or 11 (64-bit), with a graphics card that supports Direct3D 11. |
+| 🖥️ **PC** | Windows 10 or 11 (64-bit), with a graphics card that supports Direct3D 11. A **Steam Deck** or Linux PC through Proton should work too, but it's experimental: see [Steam Deck and Linux](#steam-deck-and-linux-proton). |
 | 💾 **Disk space** | About 4 GB for the installed game. |
 | 🎮 **Controller** | Optional. Any XInput (Xbox-style) pad works, and so does the keyboard. Co-op needs a second controller. |
 | 🎬 **FFmpeg** | Optional. It's only used once, during install, to convert the game's movies for PC. The launcher can download it for you. |
@@ -106,6 +108,33 @@ flowchart LR
     F[buffy_settings.ini] -->|Launcher: Settings| D
 ```
 
+### Updates
+
+From v0.3.0 the launcher updates itself. When it starts, it checks [Releases](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/releases) and offers any newer version. You can also press **Check now** in the **Updates** box on the **Play** tab. An update replaces the programs, shaders and the mods that come with the release. Your saves, settings and your own mods are kept. The download is checked against the SHA-256 that GitHub lists before anything is replaced. To stop the check at startup, untick **Check when the launcher starts**.
+
+**Coming from v0.1.0 or v0.2.0:** those versions have no updater. Download the latest zip once and unzip it over your launcher's folder.
+
+### Steam Deck and Linux (Proton)
+
+> [!NOTE]
+> **Experimental and untested so far.** The port is a Windows program. On a Steam Deck or a Linux PC it runs through **Proton**, Steam's compatibility layer. The launcher and game are made to work there, but nobody has tried them on Linux yet. If something goes wrong, please [report it](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/issues), with `buffy_log.txt` from the game folder. Its first lines say what the game ran on.
+
+**Set up (Desktop Mode):**
+
+1. Download the latest zip from [Releases](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/releases/latest) and unzip it, for example into `~/Games/Buffy-PC`. Copy your `.iso` onto the Deck or its SD card.
+2. In Steam: **Games → Add a Non-Steam Game to My Library → Browse**. Set the file type to **All Files** and choose `Buffy Launcher.exe`.
+3. In that entry's **Properties → Compatibility**, tick **Force the use of a specific Steam Play compatibility tool** and pick **Proton Experimental** (or the newest Proton).
+4. Start it from Steam and use the **Install** tab as on Windows. In the file dialogs your Linux files are on drive **Z:**, for example `Z:\home\deck\Games`. **Download FFmpeg** works there too, and fetches the Windows build, which runs under Proton.
+
+**Play in Game Mode:** add the game folder's `buffy_chaos_bleeds.exe` as another non-Steam game and force Proton on it the same way. It starts straight into the game. On a Deck, the first run is fullscreen at 1280 × 720. You can also keep using the launcher entry and press **Play** (use the trackpad or touchscreen).
+
+**Tips:**
+
+- **Controls:** the Deck's controls act as an Xbox controller. The launcher's **Controls** tab sets the keyboard and mouse.
+- **Something draws wrong:** in the launcher's **Settings**, set **Renderer** to **Emulated Xbox GPU** and compare.
+- **No movies:** the cutscene movies play through Windows Media Foundation, which depends on the Proton version. If they're skipped, try **Proton Experimental**.
+- **Updates** work under Proton: the launcher unpacks them itself, without Windows' `tar.exe`, which Proton doesn't have.
+
 ---
 
 ## Controls
@@ -141,7 +170,7 @@ It works even if the game has frozen. Attach the folder when you report a proble
 
 ## Settings
 
-You can change these in the launcher's **Settings** tab. The **Resolution** and **VSync** options are also on the game's own **Options** page. Everything is saved in `buffy_settings.ini` beside the exe.
+You can change these in the launcher's **Settings** tab. In the game, **Options → PC Settings** has Resolution, VSync, Fullscreen, FPS Limit, Show FPS and Debug Overlay. Everything is saved in `buffy_settings.ini` beside the exe.
 
 | Setting | What it does |
 |---|---|
@@ -149,6 +178,9 @@ You can change these in the launcher's **Settings** tab. The **Resolution** and 
 | **Resolution** | 1920×1080 is the default. 1280×720, 2560×1440 and 3840×2160 are also 16:9. The original 4:3 sizes are 640×480, 1280×960, 1920×1440 and 2560×1920. Menus and movies stay 4:3, with bars at the sides. |
 | **VSync** | Waits for the monitor's refresh, so the picture doesn't tear. |
 | **Renderer** | **Native Direct3D 11** (the default) draws the game's Direct3D calls directly and is much faster. **Emulated Xbox GPU** is the older renderer that emulates the Xbox graphics chip. Keep it as a fallback if something looks wrong, and please report it. |
+| **FPS limit** | 60 (the default) or 30. The game's speed is tied to its frame rate, so it never runs above 60. |
+| **Show FPS counter** | A small frame-rate counter in the top-left corner. |
+| **Debug overlay** | A panel in the top-left corner with the frame rate, average and worst frame time, a graph of recent frame times, the renderer in use, the resolution and VSync, and your graphics card. |
 | **Widescreen: keep the original side-to-side view** | On by default. It shows the original view with the top and bottom trimmed, which avoids pop-in and clipping at the edges of the screen. Untick it for the game's own wider view. |
 | **Skip the intro movies** | Goes straight to the title screen. |
 | **Invert camera left / right** | Flips the right stick's horizontal direction. |
@@ -169,8 +201,13 @@ Mods live in the game folder's `mods\` folder. Tick them in the launcher's **Mod
 
 | Mod | What it does | Works in |
 |---|---|---|
-| 🧛 **Story co-op** *(experimental)* | A second player joins the story. Press **Start on controller 2** during a level and pick any of the **24 characters**. Both players share one inventory, and each gets their own camera, pause menu and window. See the [co-op guide](#story-co-op-guide). | Story |
-| 🔄 **Player 1 Change Character** | Adds **Change Character** to player 1's pause menu. You can carry on the story as any of the 24 characters. | Story |
+| 🧛 **Story co-op** *(experimental)* | A second player joins the story. Press **Start on controller 2** during a level and pick one of the **six story characters**. Both players share one inventory, and each gets their own camera, pause menu and window. See the [co-op guide](#story-co-op-guide). | Story |
+| 🔄 **Player 1 Change Character** | Adds **Change Character** to player 1's pause menu. You can carry on the story as any of the six story characters. | Story |
+| 💜 **Tara** *(character mod)* | Adds **Tara** to the in-level Character Select, after the story characters. She plays as Willow (same moves, spells and inventory) with her own look and Willow's voice. Her story boss model and vampire Tara are two more outfits. A character mod is a `[Character]` section in `mod.ini`: `BaseCharacter` (whose moves) and `LookRow` (whose look). | Story |
+| 🕴️ **Evil Giles** *(character mod)* | Adds **Evil Giles** (Ripper, the boss) to the in-level Character Select. His boss model is put on Willow's rig (the bones converted, so every player animation drives him): her spells, stake and pickups. `Model` in `[Character]` names any model file to wear; `BaseCharacter` whose moves. Its other outfit is the Ripper, his demon form. | Story |
+| 👗 **Outfits** | On the in-level Character Select, **X** changes the highlighted character's outfit (each player picks their own); a message says which. A character mod lists its outfits with `Outfits = model:skin, model:first-last` in `[Character]`. | Story |
+| 🎬 **Story character outfits** | More outfits for the story characters from their cutscene and special models: Buffy 3, Willow 4, Xander 3, Faith 3, Spike 2 (`[Outfits]` in `mod.ini`). | Story |
+| 🎭 **Story cast (character mods)** | One mod each, on the in-level Character Select: **Ethan Rayne**, **Anya**, **Anyanka**, **Adam**, **Civilian (Man)** and **(Woman)**, **Soldier**, **Cyborg**, **Skeleton**, **Vampire** (21 outfits), **Vampire (Woman)** (10) and **Vampire (Leader)** (7). Each is the story's own model on a story character's moves. | Story |
 | 🧙 **Always play as Willow** | You play every story level as Willow, whoever the level normally uses. A level built around another character's abilities may be harder as Willow, or impossible to finish. | Story |
 | ✨ **Willow: every spell from the start** | Willow has all **14 spells** from her first level instead of learning them as the story goes on. | Story and multiplayer |
 | 👥 **Unlock all multiplayer characters** | Every character on the multiplayer Character Select can be picked without unlocking them in the story first. | Multiplayer |
@@ -251,7 +288,7 @@ textures_replacement\
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/coop-join.jpg" alt="Player 2 picks a character"><br><sub>Player 2 presses <b>Start</b> and picks from all 24 characters</sub></td>
+    <td width="50%"><img src="docs/screenshots/coop-join.jpg" alt="Player 2 picks a character"><br><sub>Player 2 presses <b>Start</b> and picks a character</sub></td>
     <td width="50%"><img src="docs/screenshots/pause-coop.jpg" alt="Pause menu with Co-op and Change Character"><br><sub>Player 1's pause menu, with <b>Co-op</b> and <b>Change Character</b></sub></td>
   </tr>
 </table>
@@ -279,7 +316,7 @@ sequenceDiagram
     participant G as Game
     participant P2 as Player 2 (pad 2)
     P2->>G: Start (in a story level)
-    G-->>P2: Character Select (24 characters)
+    G-->>P2: Character Select (story characters)
     P2->>G: A
     G-->>P2: spawns beside Player 1, own camera / window
     P1->>G: Pause → Co-op → Screens

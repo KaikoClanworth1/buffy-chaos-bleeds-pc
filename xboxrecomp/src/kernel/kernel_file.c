@@ -185,8 +185,12 @@ NTSTATUS __stdcall xbox_NtCreateFile(
             xbox_share_to_win32(ShareAccess), NULL, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS, NULL);
     } else {
-        if (CreateOptions & XBOX_FILE_NO_INTERMEDIATE_BUFFERING)
-            flags_and_attrs |= FILE_FLAG_NO_BUFFERING;
+        /* XBOX_FILE_NO_INTERMEDIATE_BUFFERING is left out: on the console it
+         * is how a title reads the DVD, but as FILE_FLAG_NO_BUFFERING every
+         * read went past Windows' file cache to the disk itself -- 150 to
+         * 250 ms a read from a hard disk, a hitch in play each time. Read
+         * through the cache, the same bytes arrive (the flag only adds
+         * alignment rules the title already keeps). */
         if (FileAttributes & XBOX_FILE_ATTRIBUTE_READONLY)
             flags_and_attrs |= FILE_ATTRIBUTE_READONLY;
         h = CreateFileW(win_path, xbox_access_to_win32(DesiredAccess),

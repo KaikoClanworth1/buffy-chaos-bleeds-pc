@@ -21,11 +21,13 @@
 
 #include "recomp/gen/recomp_types.h"
 #include "buffy_settings.h"
+#include "buffy_platform.h"
 
 void nv2a_gpu_set_display(int width, int height, int vsync, int fullscreen);
 void nv2a_gpu_set_display_callback(void (*cb)(int fullscreen));
 void nv2a_gpu_set_frame_widescreen(int wide);
 void nv2a_gpu_set_texture_pack(const wchar_t *root, int dump, int load, int prefetch);
+void nv2a_gpu_set_overlay(int mode);   /* 0 off, 1 FPS, 2 debug panel (nv2a_pb_d3d11.inc) */
 int  buffy_movie_active(void);
 
 #define G_APP_WIDESCREEN   0x26D764u       /* XApp +0x34: TV is widescreen */
@@ -42,6 +44,8 @@ static const struct { int w, h; } k_res[] = {
 
 static int  s_res = DEFAULT_RES, s_vsync = 1, s_fullscreen;
 static int  s_ws_wide, s_invert_x;      /* [Display] WidescreenWide, [Controls] InvertCameraX */
+static int  s_interp;                   /* [Display] FrameInterpolation */
+static int  s_fps_limit = 60, s_show_fps, s_overlay;   /* [Display] FpsLimit, ShowFps, DebugOverlay */
 static char s_path[MAX_PATH];
 
 void buffy_settings_save(void)
@@ -56,11 +60,21 @@ void buffy_settings_save(void)
     WritePrivateProfileStringA("Display", "VSync", s_vsync ? "1" : "0", s_path);
     WritePrivateProfileStringA("Display", "Fullscreen", s_fullscreen ? "1" : "0", s_path);
     WritePrivateProfileStringA("Display", "RenderScale", NULL, s_path);   /* old key */
+    sprintf_s(v, sizeof v, "%d", s_fps_limit);
+    WritePrivateProfileStringA("Display", "FpsLimit", v, s_path);
+    WritePrivateProfileStringA("Display", "ShowFps", s_show_fps ? "1" : "0", s_path);
+    WritePrivateProfileStringA("Display", "DebugOverlay", s_overlay ? "1" : "0", s_path);
+}
+
+static void apply_overlay(void)
+{
+    nv2a_gpu_set_overlay(s_overlay ? 2 : s_show_fps ? 1 : 0);
 }
 
 static void apply(void)
 {
     nv2a_gpu_set_display(k_res[s_res].w, k_res[s_res].h, s_vsync, s_fullscreen);
+    apply_overlay();
 }
 
 /* The renderer's Alt+Enter / F11 toggle. */
@@ -96,10 +110,19 @@ void buffy_settings_load(void)
         s_res = i >= 0 ? i : DEFAULT_RES;
         s_vsync = GetPrivateProfileIntA("Display", "VSync", 1, s_path) != 0;
         s_fullscreen = GetPrivateProfileIntA("Display", "Fullscreen", 0, s_path) != 0;
+        if (i < 0 && !GetPrivateProfileIntA("Display", "Width", 0, s_path) && buffy_on_steam_deck()) {
+            /* first run on a Steam Deck: its own screen, 720p */
+            s_res = find_res(1280, 720);
+            s_fullscreen = 1;
+        }
         if (i < 0)
             buffy_settings_save();                 /* first run or old file: write it */
-        s_ws_wide = GetPrivateProfileIntA("Display", "WidescreenWide", 0, s_path) != 0;
+        s_ws_wide = GetPrivateProfileIntA("Display", "WidescreenWide", 1, s_path) != 0;
+        s_interp = GetPrivateProfileIntA("Display", "FrameInterpolation", 0, s_path) != 0;
         s_invert_x = GetPrivateProfileIntA("Controls", "InvertCameraX", 0, s_path) != 0;
+        s_fps_limit = GetPrivateProfileIntA("Display", "FpsLimit", 60, s_path) == 30 ? 30 : 60;
+        s_show_fps = GetPrivateProfileIntA("Display", "ShowFps", 0, s_path) != 0;
+        s_overlay = GetPrivateProfileIntA("Display", "DebugOverlay", 0, s_path) != 0;
         /* [Game], set from the launcher's Settings tab. */
         if (GetPrivateProfileIntA("Game", "SkipIntroMovies", 0, s_path) && !getenv("BUFFY_SKIP_INTRO"))
             _putenv("BUFFY_SKIP_INTRO=1");
@@ -159,6 +182,30 @@ void buffy_settings_set_fullscreen(int on)
     buffy_settings_save();
 }
 
+int  buffy_settings_fps_limit(void) { return s_fps_limit; }
+int  buffy_settings_show_fps(void)  { return s_show_fps; }
+int  buffy_settings_overlay(void)   { return s_overlay; }
+
+void buffy_settings_set_fps_limit(int fps)
+{
+    s_fps_limit = fps == 30 ? 30 : 60;
+    buffy_settings_save();
+}
+
+void buffy_settings_set_show_fps(int on)
+{
+    s_show_fps = on != 0;
+    apply_overlay();
+    buffy_settings_save();
+}
+
+void buffy_settings_set_overlay(int on)
+{
+    s_overlay = on != 0;
+    apply_overlay();
+    buffy_settings_save();
+}
+
 /* Once a frame, on the game thread (buffy_frame.c): keep the game's
  * widescreen flags in line with the resolution, and tell the display whether
  * this frame is 16:9. */
@@ -178,6 +225,19 @@ void buffy_settings_frame(void)
             MEM8(G_MS_WIDESCREEN) = (uint8_t)ws;
     }
     nv2a_gpu_set_frame_widescreen(MEM8(G_MS_WIDESCREEN) && !buffy_movie_active());
+    {
+        /* (testing) BUFFY_TEST_FPS_AT=secs: the FPS counter turned on then */
+        static DWORD t0;
+        static int done;
+        const char *at = getenv("BUFFY_TEST_FPS_AT");
+        if (!t0)
+            t0 = GetTickCount();
+        if (at && !done && GetTickCount() - t0 > (DWORD)(atof(at) * 1000)) {
+            done = 1;
+            fprintf(stderr, "[SETTINGS] (test) FPS counter on\n");
+            buffy_settings_set_show_fps(1);
+        }
+    }
 }
 
 /* The settings file (for other parts' own sections, e.g. [Coop]). */
@@ -186,9 +246,15 @@ const char *buffy_settings_path(void)
     return s_path;
 }
 
-/* Widescreen view: 0 (default) the original side-to-side view, top and
- * bottom trimmed; 1 the game's own widescreen, wider at the sides (which its
- * 4:3 culling and camera collision were not made for). */
+/* Widescreen view: 1 (default) the game's own widescreen, wider at the sides
+ * (checked in the Magic Box and the cemetery: nothing culled at the edges);
+ * 0 the original side-to-side view zoomed, top and bottom trimmed. */
+/* Frame interpolation (a frame between each two of the game's): on. */
+int buffy_settings_frame_interpolation(void)
+{
+    return s_interp || getenv("BUFFY_INTERP");
+}
+
 int buffy_settings_widescreen_wide(void)
 {
     return s_ws_wide;

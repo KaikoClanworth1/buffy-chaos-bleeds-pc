@@ -1,9 +1,11 @@
 /**
  * PC entries in the game's own book menus.
  *
- *   Options page:  Resolution (render scale) and VSync -- after Sound
- *                  Volume, changed with Left / Right / A. (Fullscreen is
- *                  Alt+Enter / F11; a third line would cover the prompt.)
+ *   Options page:  PC Settings -- after Sound Volume: a page of its own
+ *                  (the Options page opened again as a popup, its lines
+ *                  rewritten by buffy_mods.c) with Resolution, VSync,
+ *                  Fullscreen, FPS Limit, Show FPS and Debug Overlay, each
+ *                  changed with Left / Right / A.
  *   Main menu:     Exit -- after Extras.
  *
  * The menus are HUD scripts: each line is an XHudScriptButton the script
@@ -47,7 +49,7 @@ uint32_t xbox_ContiguousAllocatedBytes(void);
 #define TYPE_MUSIC_VOL  0x46000085u
 #define LABEL_EXTRAS    0x450004D7u        /* main menu "Extras" */
 
-enum { E_RESOLUTION, E_VSYNC, E_FULLSCREEN, E_EXIT, E_COOP, E_P1CHANGE, E_COUNT };
+enum { E_RESOLUTION, E_VSYNC, E_FULLSCREEN, E_EXIT, E_COOP, E_P1CHANGE, E_PCSET, E_PCSIXTH, E_COUNT };
 #define TYPE_OURS(e)    (0x46FF0001u + (uint32_t)(e))
 
 #define PAD_LEFT   0x40u
@@ -113,6 +115,12 @@ static void label_for(int e, wchar_t *out, size_t n)
     case E_FULLSCREEN: swprintf(out, n, L"Fullscreen  %ls", buffy_settings_fullscreen() ? L"On" : L"Off"); break;
     case E_COOP:       swprintf(out, n, L"Co-op"); break;
     case E_P1CHANGE:   swprintf(out, n, L"Change Character"); break;
+    case E_PCSET:      swprintf(out, n, L"PC Settings"); break;
+    case E_PCSIXTH: {
+        void buffy_pc_line_text(int line, wchar_t *out, size_t n);
+        buffy_pc_line_text(5, out, n);
+        break;
+    }
     default:           swprintf(out, n, L"Exit"); break;
     }
 }
@@ -206,6 +214,15 @@ static void add_entry(uint32_t wnd, uint32_t src_tmpl, uint32_t prev_anim, int e
     }
     if (e == E_P1CHANGE)
         MEM32(s_tmpl + 0x68) |= 0x4u | 0x8000u | 0x40000u;          /* text, fit to the line's box, centred */
+    if (e == E_PCSET) {
+        /* opens the Options page again as a popup: buffy_mods.c makes it
+         * the PC settings page */
+        MEM32(s_tmpl + 0x68) |= 0x2u;
+        /* the page: in the front end its main menu page (plain lines, no
+         * values or bars); in play the pause menu's Options page (the main
+         * menu is not in the in-game files) */
+        MEM32(s_tmpl + 0x6C) = MEM32(wnd + 0x174) == 0x040000F5u ? 0x0400011Cu : MEM32(wnd + 0x174);
+    }
 
     n = MEM32(wnd + 0x190);
     call_this1(XHudScriptWnd_AddButton_00051590_orig, wnd, s_tmpl);
@@ -464,6 +481,24 @@ void XHudScriptWnd_AddButton_00051590(void)
                 gothic(b);
                 set_text(b, text);
             }
+            {
+                /* the PC settings page on the main menu page: its sixth
+                 * line, a line below the fifth, from the fifth's template */
+                int buffy_pc_take_sixth(void);
+                if (buffy_pc_take_sixth() && MEM32(wnd + 0x190) == n + 1) {
+                    static uint32_t src6;
+                    uint32_t prev6 = n ? MEM32(MEM32(MEM32(wnd + 0x194) + (n - 1) * 4) + 0x24) : 0;
+                    if (!src6)
+                        src6 = xbox_HeapAlloc(BTN_SIZE, 16);
+                    if (src6 && prev6) {
+                        int k;
+                        for (k = 0; k < BTN_SIZE; k += 4)
+                            MEM32(src6 + k) = MEM32(tmpl + k);
+                        MEM32(src6 + 0x24) = MEM32(MEM32(MEM32(wnd + 0x194) + n * 4) + 0x24);
+                        add_entry(wnd, src6, prev6, E_PCSIXTH, 1.0f, 0x3u);
+                    }
+                }
+            }
             g_eax = eax;
             return;
         }
@@ -509,11 +544,8 @@ void XHudScriptWnd_AddButton_00051590(void)
                 }
                 s_coop_wnd = wnd;
             } else if (options) {
-                /* Two lines fit between Sound Volume and the page's
-                 * Select / Back prompt at 3/4 of the page's spacing;
-                 * fullscreen stays on Alt+Enter / F11. */
-                add_entry(wnd, src, prev, E_RESOLUTION, 0.75f, 0);
-                add_entry(wnd, src, prev, E_VSYNC, 1.5f, 0);
+                /* one line under Sound Volume: the PC settings page */
+                add_entry(wnd, src, prev, E_PCSET, 1.0f, 0);
             } else {
                 void buffy_input_menu_ready(void);
                 add_entry(wnd, src, prev, E_EXIT, 1.0f, 1);   /* no jump: we handle A */
@@ -564,6 +596,46 @@ static void press(int e, uint32_t btn, uint32_t mask)
     set_label(e, btn);
 }
 
+/* ── the PC settings page's lines (the page: buffy_mods.c) ────────────── */
+
+#define PC_LINES 6
+
+void buffy_pc_line_text(int line, wchar_t *out, size_t n)
+{
+    switch (line) {
+    case 0: swprintf(out, n, L"Resolution  %dx%d", buffy_settings_res_width(), buffy_settings_res_height()); break;
+    case 1: label_for(E_VSYNC, out, n); break;
+    case 2: label_for(E_FULLSCREEN, out, n); break;
+    case 3: swprintf(out, n, L"FPS Limit  %d", buffy_settings_fps_limit()); break;
+    case 4: swprintf(out, n, L"Show FPS  %ls", buffy_settings_show_fps() ? L"On" : L"Off"); break;
+    default: swprintf(out, n, L"Debug Overlay  %ls", buffy_settings_overlay() ? L"On" : L"Off"); break;
+    }
+}
+
+/* A press on line `line` (Left / Right / A; the game's pad bits). */
+int buffy_pc_line_press(uint32_t btn, int line, uint32_t mask, int left, int any)
+{
+    static DWORD last;
+    wchar_t w[64];
+    void buffy_menu_set_text(uint32_t btn, const wchar_t *text);
+    if (!any || GetTickCount() - last < 250)
+        return 1;
+    last = GetTickCount();
+    switch (line) {
+    case 0: buffy_settings_step_res(left ? -1 : 1); break;
+    case 1: buffy_settings_set_vsync(!buffy_settings_vsync()); break;
+    case 2: buffy_settings_set_fullscreen(!buffy_settings_fullscreen()); break;
+    case 3: buffy_settings_set_fps_limit(buffy_settings_fps_limit() == 60 ? 30 : 60); break;
+    case 4: buffy_settings_set_show_fps(!buffy_settings_show_fps()); break;
+    default: buffy_settings_set_overlay(!buffy_settings_overlay()); break;
+    }
+    (void)mask;
+    call_cdecl1(XPlaySound_00091780, 0x1A00013Du);
+    buffy_pc_line_text(line, w, 64);
+    buffy_menu_set_text(btn, w);
+    return 1;
+}
+
 /* char XHudScriptButton::OnPress(int pad, int, unsigned mask) -- wrapped. */
 int buffy_coop_menu_press(uint32_t btn, uint32_t mask);
 
@@ -593,6 +665,30 @@ void XHudScriptButton_OnPress_0004D2E0(void)
          * Select opens (buffy_mods.c) */
         if (MEM32(g_esp + 12) & PAD_A)
             buffy_coop_p1_change_pressed(btn);
+        g_esp += 4 + 12;
+        g_eax = 0;
+        return;
+    }
+    if (e == E_PCSIXTH) {
+        /* the PC settings page's sixth line (on the main menu page) */
+        int buffy_pc_line_press(uint32_t btn, int line, uint32_t mask, int left, int any);
+        uint32_t m = MEM32(g_esp + 12);
+        buffy_pc_line_press(btn, 5, m, (m & 0x44u) != 0, (m & (PAD_A | 0x44u | 0x88u)) != 0);
+        g_esp += 4 + 12;
+        g_eax = 0;
+        return;
+    }
+    if (e == E_PCSET) {
+        /* PC Settings: the game opens the line's popup (the Options page),
+         * which buffy_mods.c turns into the PC settings page */
+        int buffy_pc_page_pending(void);
+        if ((MEM32(g_esp + 12) & PAD_A) && !buffy_pc_page_pending()) {
+            void buffy_pc_page_opening(void), buffy_pc_page_opened(void);
+            buffy_pc_page_opening();
+            XHudScriptButton_OnPress_0004D2E0_orig();
+            buffy_pc_page_opened();
+            return;
+        }
         g_esp += 4 + 12;
         g_eax = 0;
         return;
