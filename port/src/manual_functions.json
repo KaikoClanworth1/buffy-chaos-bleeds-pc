@@ -128,5 +128,22 @@
   "0x00097360": "wrap:XTrigger_Database_Deload_HashCodeFileInUse_00097360",
   "0x0002E2C0": "wrap:XApp_StartGameMode_0002E2C0",
   "0x000C31C0": "wrap:EXItemEnv_IsPortalVisible_000C31C0",
-  "0x00097C30": "wrap:XTrigger_MonsterSpawn_Active_DoUpdate_00097C30"
+  "0x00097C30": "wrap:XTrigger_MonsterSpawn_Active_DoUpdate_00097C30",
+  "0x0009FA90": "wrap:XTrigger_Distance_Suspend_DoUpdate_0009FA90",
+  "0x000A0090": "wrap:XTrigger_Distance_Active_DoUpdate_000A0090",
+  "0x0009B2A0": "wrap:XTrigger_Active_Suspend_Suspend_DoUpdate_0009B2A0",
+  "0x000A9850": "wrap:XItemHandler_FindPlayer_000A9850",
+  "0x0008EBA0": "wrap:XItemHandler_ScriptBaseTrigger_DoScriptCmdEvent_0008EBA0",
+  "0x00090200": "wrap:XItemHandler_ScriptBaseTrigger_DoScriptCmdEvent2_00090200",
+  "0x00027290": "wrap:XItemHandler_Npc_DetermineBehaviour_00027290",
+  "0x00024490": "wrap:XItemHandler_Npc_BlockedByPlayer_00024490",
+  "0x00024560": "wrap:XItemHandler_Npc_SetUpIdle_00024560",
+  "0x00025B80": "wrap:XItemHandler_Npc_TrackTarget_00025B80",
+  "0x000260F0": "wrap:XItemHandler_Npc_AlterDirection_000260F0",
+  "0x00024890": "wrap:XItemHandler_Npc_CornerCount_00024890",
+  "0x00022DB0": "wrap:XItemHandler_Bakemono_DoMonsterSpecificUpdate_00022DB0",
+  "0x00067220": "wrap:XItemHandler_Monster_CreateEnergyTransfer_00067220",
+  "0x000BB340": "wrap:XItemHandler_Particle_Energy_DoUpdate_000BB340",
+  "0x000A0320": "wrap:XTrigger_Bystander_Activate_000A0320",
+  "0x0009D5A0": "wrap:XTrigger_ScrollTrigger_Active_DoUpdate_0009D5A0"
 }

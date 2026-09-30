@@ -269,8 +269,9 @@ static void run_events(XBOX_GAMEPAD *g, const PadEvent *ev, int nev, DWORD rel)
             apply_button(g, ev[k].name);
 }
 
-/* Testing: a button held on player 1's pad for the tests in buffy_mods.c. */
+/* Testing: a button held on player 1's (and player 2's) pad for the tests in buffy_mods.c. */
 const char *volatile g_test_button;
+const char *volatile g_test_button2;
 
 int buffy_mouse_look_allowed(void);
 
@@ -278,6 +279,8 @@ static void apply_script(int port, XBOX_GAMEPAD *g)
 {
     if (port == 0 && g_test_button)
         apply_button(g, g_test_button);
+    if (port == 1 && g_test_button2)
+        apply_button(g, g_test_button2);
     static int inited, n1, n2, np2;
     static PadEvent e1[64], e2[64], ep2[64];
     static DWORD t0;

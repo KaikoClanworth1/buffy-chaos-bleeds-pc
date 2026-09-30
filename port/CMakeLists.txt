@@ -13,7 +13,7 @@ project(buffy_chaos_bleeds C CXX)
 # The release version: the launcher compares it with the newest release on
 # GitHub (its updater), and tools/package.sh names the zip after it. Raise it
 # for each release, matching the release tag (v0.3.0).
-set(BUFFY_VERSION "0.4.0")
+set(BUFFY_VERSION "0.4.1")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

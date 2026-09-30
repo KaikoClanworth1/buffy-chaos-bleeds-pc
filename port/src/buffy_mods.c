@@ -854,8 +854,215 @@ int buffy_pc_take_sixth(void)
     return v;
 }
 
+/* ── trigger audit (testing) ─────────────────────────────────────────────
+ *
+ * BUFFY_TRIG_TEST=secs: `secs` after the level starts, lists every trigger
+ * ([TRIG] lines: address, its update functions -- which name its class --,
+ * position, radius, room, flags), then probes each climb spot
+ * (XTrigger_PlayerActionCheck: it marks a character that may climb there,
+ * handler +0x71E bit / +0x75C) for player 1 and then player 2 -- the
+ * probed player put on the spot, the other left where they were -- and
+ * logs whether the spot marked them ([TRIGPROBE]). The level's triggers
+ * are a list at EXItemEnv (0x26DC68) +0x84: node at trigger +4, next +8. */
+#define TRIG_ENV        0x26DC68u
+#define TRIG_PAC_ACTIVE 0x00099B10u        /* XTrigger_PlayerActionCheck_Active_DoUpdate */
+#define TRIG_PROBE_FRAMES 110
+extern const char *volatile g_test_button, *volatile g_test_button2;
+
+static uint32_t trig_first(void)
+{
+    uint32_t n = MEM32(TRIG_ENV + 0x84);
+    return n ? n - 4 : 0;
+}
+
+static uint32_t trig_next(uint32_t t)
+{
+    uint32_t n = MEM32(t + 8);
+    return n ? n - 4 : 0;
+}
+
+static void trig_census(void)
+{
+    uint32_t t;
+    int n = 0;
+    for (t = trig_first(); t && n < 4096; t = trig_next(t), n++)
+        fprintf(stderr, "[TRIG] %08X act %08X susp %08X on %08X pos %.2f %.2f %.2f r %.2f room %u f44 %08X f48 %08X a60 %d a5c %08X\n",
+                t, MEM32(t + 0x98), MEM32(t + 0x9C), MEM32(t + 0xA0), MEMF(t + 0xC), MEMF(t + 0x10), MEMF(t + 0x14),
+                MEMF(t + 0x54), (unsigned)MEM16(t + 0x3C), MEM32(t + 0x44), MEM32(t + 0x48), (int)MEM32(t + 0x60), MEM32(t + 0x5C));
+    fprintf(stderr, "[TRIG] game mode (XApp +0x234) %u\n", MEM32(0x26D868) ? MEM32(MEM32(0x26D868) + 0x234) : 0);
+    fprintf(stderr, "[TRIG] %d triggers; groups (+174): player 1 %08X, player 2 %08X\n", n,
+            MEM32(0x26DC54) ? MEM32(MEM32(0x26DC54) + 0x174) : 0, MEM32(0x26DC58) ? MEM32(MEM32(0x26DC58) + 0x174) : 0);
+}
+
+void EXItemEnv_IsSubMapVisible_000C3160(void);
+void XItemHandler_Camera_ResetPlayerLookAtAndPos_0003A5E0(void);
+
+/* The story camera put back behind `player` (as the game does after moving
+ * the player): slot 0 lent to them for the call. */
+static void trig_cam_to(uint32_t player)
+{
+    uint32_t cam = MEM32(0x26DC64), h, slot0 = MEM32(0x26DC54);
+    uint32_t esp0 = g_esp, regs[6] = { g_eax, g_ebx, g_ecx, g_edx, g_esi, g_edi };
+    if (!cam || !(h = MEM32(cam + 0x14C)) || !player)
+        return;
+    MEM32(0x26DC54) = player;
+    g_esp -= 4; MEM32(g_esp) = 0;
+    g_esp -= 4; MEM32(g_esp) = 0;                  /* (return address slot) */
+    g_ecx = h;
+    XItemHandler_Camera_ResetPlayerLookAtAndPos_0003A5E0();
+    g_esp = esp0;
+    MEM32(0x26DC54) = slot0;
+    g_eax = regs[0]; g_ebx = regs[1]; g_ecx = regs[2]; g_edx = regs[3]; g_esi = regs[4]; g_edi = regs[5];
+}
+
+/* The game's own answer (with the co-op wrapper): is room `room` live? */
+static int hud_visible(void);
+
+static int trig_room_vis(unsigned room)
+{
+    uint32_t esp0 = g_esp, regs[6] = { g_eax, g_ebx, g_ecx, g_edx, g_esi, g_edi }, r;
+    g_esp -= 4; MEM32(g_esp) = room;
+    g_esp -= 4; MEM32(g_esp) = 0;                  /* (return address slot) */
+    g_ecx = 0x26DC68;
+    EXItemEnv_IsSubMapVisible_000C3160();
+    r = g_eax & 0xFF;
+    g_esp = esp0;
+    g_eax = regs[0]; g_ebx = regs[1]; g_ecx = regs[2]; g_edx = regs[3]; g_esi = regs[4]; g_edi = regs[5];
+    return (int)r;
+}
+
+static void trig_test_frame(void)
+{
+    static DWORD t0;
+    static int phase;                       /* 0 waiting, 1 probing, 2 done */
+    static uint32_t cur, list[512];
+    static int nlist, at, who, frames, marked;
+    static float y0, xz0[2];
+    static unsigned long long modes;
+    static float home[2][4];
+    const char *e = getenv("BUFFY_TRIG_TEST");
+    uint32_t p;
+    if (!e || phase == 2)
+        return;
+    if (!MEM32(0x26DC54)) {
+        t0 = 0;
+        return;
+    }
+    if (!t0)
+        t0 = GetTickCount();
+    if (phase == 0) {
+        uint32_t t;
+        int i;
+        static DWORD hud_since;
+        if (GetTickCount() - t0 < (DWORD)(atof(e) * 1000))
+            return;
+        /* (and in play: the HUD up for 3 s -- not in the level's opening cutscene) */
+        if (!hud_visible()) {
+            hud_since = 0;
+            return;
+        }
+        if (!hud_since)
+            hud_since = GetTickCount();
+        if (GetTickCount() - hud_since < 3000)
+            return;
+        trig_census();
+        for (t = trig_first(); t && nlist < 512; t = trig_next(t))
+            if (MEM32(t + 0x98) == TRIG_PAC_ACTIVE || MEM32(t + 0x9C) == TRIG_PAC_ACTIVE || MEM32(t + 0x9C) == 0x00099C40u)
+                list[nlist++] = t;
+        for (i = 0; i < 2; i++)
+            if (MEM32(0x26DC54 + i * 4))
+                memcpy(home[i], (const void *)XBOX_PTR(MEM32(0x26DC54 + i * 4) + 0xAC), 16);
+        fprintf(stderr, "[TRIGPROBE] %d climb spots, players %08X %08X\n", nlist, MEM32(0x26DC54), MEM32(0x26DC58));
+        phase = 1;
+        at = 0;
+        who = 0;
+        frames = -1;
+    }
+    /* one spot and player at a time: put them there, watch for the mark */
+    while (at < nlist) {
+        p = MEM32(0x26DC54 + who * 4);
+        if (!p) {
+            if (++who > 1) { who = 0; at++; }
+            continue;
+        }
+        cur = list[at];
+        if (MEM32(cur + 0x60) != 0 || (getenv("BUFFY_TRIG_ROOM") && MEM16(cur + 0x3C) != (unsigned)atoi(getenv("BUFFY_TRIG_ROOM")))) {   /* (climb-up spots, the bottoms, only) */
+            who = 0;
+            at++;
+            continue;
+        }
+        if (frames < 0) {
+            int i;
+            if (MEM32(p + 0x14C))
+                call_this1(XItemHandler_Player_SetGameMode_000758E0, MEM32(p + 0x14C), 1);   /* (off any ladder) */
+            for (i = 0; i < 2; i++)                  /* everyone home first */
+                if (MEM32(0x26DC54 + i * 4) && i != who)
+                    memcpy((void *)XBOX_PTR(MEM32(0x26DC54 + i * 4) + 0xAC), home[i], 16);
+            MEMF(p + 0xAC) = MEMF(cur + 0xC);
+            MEMF(p + 0xB0) = MEMF(cur + 0x10);
+            MEMF(p + 0xB4) = MEMF(cur + 0x14);
+            MEM8(p + 0x69) = 0;
+            MEMF(p + 0xC0) = MEMF(cur + 0x20) + 3.14159265f;   /* facing the ladder */
+            trig_cam_to(p);                              /* (the view goes with them) */
+            if (who == 1)
+                s_cam2_valid = 0;                        /* (player 2's camera: a copy of that) */
+            frames = 0;
+            marked = 0;
+            y0 = MEMF(p + 0xB0);
+            xz0[0] = MEMF(p + 0xAC);
+            xz0[1] = MEMF(p + 0xB4);
+            modes = 0;
+            return;
+        }
+        if (frames == 5 && who == 1 && getenv("BUFFY_TRIG_WATCH") && MEM32(p + 0x14C)) {
+            void buffy_menu_watch(uint32_t guest_va);
+            buffy_menu_watch(MEM32(p + 0x14C) + 0x71C);   /* (who clears player 2's climb flags) */
+        }
+        if (frames == 10)                                /* then walk into it */
+            *(who ? &g_test_button2 : &g_test_button) = who && getenv("BUFFY_TRIG_P2STICK") ? getenv("BUFFY_TRIG_P2STICK") : "LSU";
+        if (MEM32(p + 0x14C))
+            modes |= 1ull << (MEM8(MEM32(p + 0x14C) + 0x749) & 63);
+        if (frames == 1 && who == 1)
+            trig_cam_to(MEM32(0x26DC54));                /* (player 1's view back home) */
+        {
+            uint32_t h = MEM32(p + 0x14C);
+            if (h && MEM32(h + 0x75C) == cur)
+                marked |= 1;
+            if (h && (MEM8(h + 0x71E) & (1u << (MEM32(cur + 0x60) & 7))))
+                marked |= 2;
+            if (MEM32(cur + 0x44) & 0x40000)
+                marked |= 4;                         /* (the spot came alive) */
+            if (trig_room_vis(MEM16(cur + 0x3C)) > 0)
+                marked |= 8;                         /* (its room was visible) */
+        }
+        if (++frames < TRIG_PROBE_FRAMES)
+            return;
+        g_test_button = g_test_button2 = NULL;
+        fprintf(stderr, "[TRIGPROBE] (player %d walked %.2f, heading %.2f, facing %.2f, ladder %.2f)\n", who + 1,
+                sqrtf((MEMF(p + 0xAC) - xz0[0]) * (MEMF(p + 0xAC) - xz0[0]) + (MEMF(p + 0xB4) - xz0[1]) * (MEMF(p + 0xB4) - xz0[1])),
+                MEM32(p + 0x14C) ? MEMF(MEM32(p + 0x14C) + 0x770) : -9.0f, MEMF(p + 0xC0), MEMF(cur + 0x20));
+        fprintf(stderr, "[TRIGPROBE] spot %08X (%.2f %.2f %.2f room %u) player %d: %s%s%s%s, rose %.2f, modes %llX\n",
+                cur, MEMF(cur + 0xC), MEMF(cur + 0x10), MEMF(cur + 0x14), (unsigned)MEM16(cur + 0x3C),
+                who + 1, (marked & 3) ? "marked" : "NOT MARKED", (marked & 4) ? ", spot alive" : ", spot asleep",
+                (marked & 8) ? ", room live" : ", room dead", MEMF(p + 0xB0) - y0 > 1.0f ? ", CLIMBED" : ", did not climb",
+                MEMF(p + 0xB0) - y0, (unsigned long long)modes);
+        frames = -1;
+        if (++who > 1) { who = 0; at++; }
+        return;
+    }
+    {
+        int i;
+        for (i = 0; i < 2; i++)
+            if (MEM32(0x26DC54 + i * 4))
+                memcpy((void *)XBOX_PTR(MEM32(0x26DC54 + i * 4) + 0xAC), home[i], 16);
+    }
+    fprintf(stderr, "[TRIGPROBE] done\n");
+    phase = 2;
+}
+
 void buffy_mods_frame(void)
 {
+    trig_test_frame();                                    /* (BUFFY_TRIG_TEST) */
     if (s_pc_page && s_pc_built && ++s_pc_built > 2) {
         s_pc_page = 0;                                    /* the popup is built: the next Options page is itself */
         s_pc_built = 0;
@@ -4650,10 +4857,272 @@ static int map_node_at(uint32_t map, uint32_t pos)
     return (int32_t)r < 0 || r > 4096 ? -1 : (int)r;
 }
 
+/* A switch from the environment, read once (these are asked thousands of
+ * times a frame: getenv each time cost co-op a third of its frame rate). */
+static int env_once(const char *name, int *cache)
+{
+    if (*cache < 0)
+        *cache = getenv(name) != NULL;
+    return *cache;
+}
+
+static int s_env_one_view = -1, s_env_no_trig_p2 = -1, s_env_mods_log = -1, s_env_world_log = -1;
+#define ENV_WORLD_LOG() env_once("BUFFY_COOP_WORLD_LOG", &s_env_world_log)
+
 static int coop_world_on(void)
 {
-    return s_story_coop && MEM32(0x26DC54) && coop_p2_item() && !in_multiplayer() && !getenv("BUFFY_COOP_ONE_VIEW");
+    return s_story_coop && MEM32(0x26DC54) && coop_p2_item() && !in_multiplayer()
+        && !env_once("BUFFY_COOP_ONE_VIEW", &s_env_one_view);
 }
+
+/* ── triggers that only look at player 1 ──────────────────────────────────
+ *
+ * Many trigger updates measure the distance to, or test the inventory or
+ * facing of, the player in slot 0 only. In co-op each such update runs once
+ * as the game does and, when that left the trigger just as it was (player 1
+ * did not set it off), once more with player 2 as player 0 (as_p0: slots,
+ * handler indices and pad map swapped, so inventory and facing checks are
+ * player 2's). "Just as it was": the update's result says stay as you are
+ * (3, or the state it is in) and the trigger's own fields +0x40..+0xC0 are
+ * unchanged -- a trigger that counted, sent a message or moved on is left
+ * alone. BUFFY_COOP_NO_TRIG_P2=1 turns it off. */
+typedef void (*GuestFn)(void);
+
+static int trig_rerun_as_p2(GuestFn orig, const char *what)
+{
+    uint32_t trig = g_ecx, esp0 = g_esp, eax, e2, before[0x20], i;
+    uint32_t cur = (MEM32(trig + 0x44) & 0x40000) ? 2 : 1;
+    AsP0 st;
+    for (i = 0; i < 0x20; i++)
+        before[i] = MEM32(trig + 0x40 + i * 4);
+    orig();
+    eax = g_eax;
+    if (s_asp0_p2 || !MEM32(0x26DC58) || !coop_world_on() || env_once("BUFFY_COOP_NO_TRIG_P2", &s_env_no_trig_p2))
+        return 0;
+    if (eax != 3 && eax != cur)
+        return 0;                                        /* player 1 set it off */
+    for (i = 0; i < 0x20; i++)
+        if (MEM32(trig + 0x40 + i * 4) != before[i])
+            return 0;
+    {
+        uint32_t regs[3] = { g_ebx, g_esi, g_edi }, esp1 = g_esp;
+        as_p0_enter(&st);
+        if (!st.on)
+            return 0;
+        g_esp = esp0;                                    /* (the return address slot again) */
+        MEM32(g_esp) = 0;
+        g_ecx = trig;
+        orig();
+        e2 = g_eax;
+        as_p0_leave(&st);
+        g_esp = esp1;
+        g_ebx = regs[0]; g_esi = regs[1]; g_edi = regs[2];
+        for (i = 0; i < 0x20 && MEM32(trig + 0x40 + i * 4) == before[i]; i++)
+            ;
+        if ((e2 != 3 && e2 != cur) || i < 0x20) {
+            if (env_once("BUFFY_MODS_LOG", &s_env_mods_log))
+                fprintf(stderr, "[MODS] co-op: player 2 set off a %s trigger %08X (%u)\n", what, trig, e2);
+            g_eax = e2;
+            return 1;
+        }
+        g_eax = eax;
+    }
+    return 0;
+}
+
+/* XTrigger_Distance: a player near, with conditions (an item carried or
+ * used, facing it) -- all of them player 1's. */
+void XTrigger_Distance_Suspend_DoUpdate_0009FA90_orig(void);
+void XTrigger_Distance_Suspend_DoUpdate_0009FA90(void)
+{
+    trig_rerun_as_p2(XTrigger_Distance_Suspend_DoUpdate_0009FA90_orig, "distance");
+}
+
+void XTrigger_Distance_Active_DoUpdate_000A0090_orig(void);
+void XTrigger_Distance_Active_DoUpdate_000A0090(void)
+{
+    trig_rerun_as_p2(XTrigger_Distance_Active_DoUpdate_000A0090_orig, "distance");
+}
+
+/* XTrigger_Active_Suspend: comes on when player 1 is within its radius. */
+void XTrigger_Active_Suspend_Suspend_DoUpdate_0009B2A0_orig(void);
+void XTrigger_Active_Suspend_Suspend_DoUpdate_0009B2A0(void)
+{
+    trig_rerun_as_p2(XTrigger_Active_Suspend_Suspend_DoUpdate_0009B2A0_orig, "radius");
+}
+
+/* ── code that means "the player" ─────────────────────────────────────────
+ *
+ * Bosses pick their target with XItemHandler::FindPlayer (player 1, always);
+ * scripted objects, NPCs, the Bakemono and energy pick-ups measure and act on
+ * the player in slot 0. In co-op they act on the player nearest them instead:
+ * FindPlayer answers that player, and the other functions run with player 2
+ * as player 0 (as_p0) when player 2 is the nearer. A choice holds until the
+ * other player is 2 units nearer, so a character between the two does not
+ * turn every frame. A script that moves the player it acted on (to a marker:
+ * the story's changes of place) brings the other one along.
+ * BUFFY_COOP_NO_NEAREST=1 turns it off. */
+#define NEAR_SLOTS 128
+static struct { uint32_t who, at; } s_near[NEAR_SLOTS];     /* who asked -> 0 player 1, 1 player 2 */
+static int s_env_no_nearest = -1;
+
+/* A guest address that may be read (the heaps: low memory and 0x80000000+). */
+static int guest_ok(uint32_t a)
+{
+    return (a >= 0x10000u && a < 0x08000000u) || (a >= 0x80000000u && a < 0x88000000u);
+}
+
+static float dist2_items(uint32_t a, uint32_t b)
+{
+    float dx = MEMF(a + 0xAC) - MEMF(b + 0xAC), dy = MEMF(a + 0xB0) - MEMF(b + 0xB0), dz = MEMF(a + 0xB4) - MEMF(b + 0xB4);
+    return dx * dx + dy * dy + dz * dz;
+}
+
+/* Which player (0 or 1) is nearest the thing at `pos_item` (an item, or a
+ * trigger: both keep their position at +0xAC... a trigger at +0xC, passed
+ * as trigger - 0xA0), remembered for `who` (the asker). */
+static int nearest_player(uint32_t who, uint32_t pos_item)
+{
+    uint32_t p1 = MEM32(0x26DC54), p2 = MEM32(0x26DC58), h = (who >> 4) % NEAR_SLOTS;
+    float d1, d2;
+    int cur;
+    if (!p1 || !p2 || !pos_item)
+        return 0;
+    d1 = dist2_items(pos_item, p1);
+    d2 = dist2_items(pos_item, p2);
+    cur = s_near[h].who == who ? (int)s_near[h].at : (d2 < d1);
+    /* switch only when the other is clearly nearer: (d_other + 2)^2 < d_cur */
+    if (cur == 0 && d2 < d1 && sqrtf(d2) + 2.0f < sqrtf(d1))
+        cur = 1;
+    else if (cur == 1 && d1 < d2 && sqrtf(d1) + 2.0f < sqrtf(d2))
+        cur = 0;
+    s_near[h].who = who;
+    s_near[h].at = (uint32_t)cur;
+    return cur;
+}
+
+static int nearest_on(void)
+{
+    return !s_asp0_p2 && MEM32(0x26DC58) && coop_world_on() && !env_once("BUFFY_COOP_NO_NEAREST", &s_env_no_nearest);
+}
+
+/* The other player to where `moved` (the item a script moved) now is. */
+static void bring_other_along(uint32_t moved)
+{
+    uint32_t other = moved == MEM32(0x26DC54) ? MEM32(0x26DC58) : MEM32(0x26DC54);
+    int i;
+    if (!other || other == moved)
+        return;
+    for (i = 0; i < 4; i++) {
+        MEM32(other + 0xAC + i * 4) = MEM32(moved + 0xAC + i * 4);
+        MEM32(other + 0xBC + i * 4) = MEM32(moved + 0xBC + i * 4);
+    }
+    MEMF(other + 0xAC) += 0.5f;                         /* (a step aside: the two push apart) */
+    MEM8(other + 0x69) = 0;
+    s_cam2_valid = 0;
+    if (env_once("BUFFY_MODS_LOG", &s_env_mods_log))
+        fprintf(stderr, "[MODS] co-op: the story moved a player; the other came along\n");
+}
+
+/* Runs `orig` (a function of a character or object whose item is `item`)
+ * as the player nearest that item. */
+static void run_as_nearest(GuestFn orig, uint32_t who, uint32_t item)
+{
+    uint32_t p1, p2;
+    float before[2][3];
+    AsP0 st;
+    int k;
+    if (!nearest_on() || !guest_ok(item) || nearest_player(who, item) == 0) {
+        orig();
+        return;
+    }
+    p1 = MEM32(0x26DC54);
+    p2 = MEM32(0x26DC58);
+    for (k = 0; k < 3; k++) {
+        before[0][k] = MEMF(p1 + 0xAC + k * 4);
+        before[1][k] = MEMF(p2 + 0xAC + k * 4);
+    }
+    {
+        uint32_t regs[4] = { g_ebx, g_ecx, g_esi, g_edi };
+        as_p0_enter(&st);
+        g_ebx = regs[0]; g_ecx = regs[1]; g_esi = regs[2]; g_edi = regs[3];
+    }
+    orig();
+    {
+        uint32_t eax = g_eax, edx = g_edx;
+        as_p0_leave(&st);
+        g_eax = eax;
+        g_edx = edx;
+    }
+    /* a script put player 2 (acting as player 1) somewhere else: player 1 too */
+    {
+        float dx = MEMF(p2 + 0xAC) - before[1][0], dy = MEMF(p2 + 0xB0) - before[1][1], dz = MEMF(p2 + 0xB4) - before[1][2];
+        if (dx * dx + dy * dy + dz * dz > 25.0f && MEM32(0x26DC58) == p2)
+            bring_other_along(p2);
+    }
+}
+
+/* A handler's item (+4), when it looks like one. */
+static uint32_t handler_item(uint32_t h)
+{
+    uint32_t it;
+    if (!guest_ok(h) || !guest_ok(it = MEM32(h + 4)) || MEM32(it + 0x14C) != h)
+        return 0;
+    return it;
+}
+
+/* XItem *XItemHandler::FindPlayer() -- the player on the character list in
+ * slot 0: a boss's target. The nearer player instead. */
+void XItemHandler_FindPlayer_000A9850_orig(void);
+void XItemHandler_FindPlayer_000A9850(void)
+{
+    uint32_t h = g_ecx, it;
+    XItemHandler_FindPlayer_000A9850_orig();
+    if (g_eax && g_eax == MEM32(0x26DC54) && nearest_on() && (it = handler_item(h)) != 0
+            && nearest_player(h, it) == 1) {
+        static DWORD last;
+        g_eax = MEM32(0x26DC58);
+        if (env_once("BUFFY_MODS_LOG", &s_env_mods_log) && GetTickCount() - last > 2000) {
+            last = GetTickCount();
+            fprintf(stderr, "[MODS] co-op: %08X (row %d) goes after player 2, the nearer\n", it, (int)MEM32(it + 0x16C));
+        }
+    }
+}
+
+#define AS_NEAREST_HANDLER(fn)                                              \
+    void fn##_orig(void);                                                   \
+    void fn(void) { run_as_nearest(fn##_orig, g_ecx, handler_item(g_ecx)); }
+
+/* scripted objects' events: distance checks, moving the player, pick-ups */
+AS_NEAREST_HANDLER(XItemHandler_ScriptBaseTrigger_DoScriptCmdEvent_0008EBA0)
+AS_NEAREST_HANDLER(XItemHandler_ScriptBaseTrigger_DoScriptCmdEvent2_00090200)
+/* NPCs (bystanders, hostages): whom they follow, avoid and react to */
+AS_NEAREST_HANDLER(XItemHandler_Npc_DetermineBehaviour_00027290)
+AS_NEAREST_HANDLER(XItemHandler_Npc_BlockedByPlayer_00024490)
+AS_NEAREST_HANDLER(XItemHandler_Npc_SetUpIdle_00024560)
+AS_NEAREST_HANDLER(XItemHandler_Npc_TrackTarget_00025B80)
+AS_NEAREST_HANDLER(XItemHandler_Npc_AlterDirection_000260F0)
+AS_NEAREST_HANDLER(XItemHandler_Npc_CornerCount_00024890)
+/* the Bakemono's target; energy from kills flying to the player */
+AS_NEAREST_HANDLER(XItemHandler_Bakemono_DoMonsterSpecificUpdate_00022DB0)
+AS_NEAREST_HANDLER(XItemHandler_Monster_CreateEnergyTransfer_00067220)
+AS_NEAREST_HANDLER(XItemHandler_Particle_Energy_DoUpdate_000BB340)
+
+/* A bystander trigger hands its NPC player 1 to follow: the nearer player
+ * (the trigger's position: +0xC, as an item's +0xAC). */
+void XTrigger_Bystander_Activate_000A0320_orig(void);
+void XTrigger_Bystander_Activate_000A0320(void)
+{
+    run_as_nearest(XTrigger_Bystander_Activate_000A0320_orig, g_ecx, g_ecx - 0xA0);
+}
+
+/* A scrolling wall (XTrigger_ScrollTrigger) pushes player 1 on: player 2 too. */
+void XTrigger_ScrollTrigger_Active_DoUpdate_0009D5A0_orig(void);
+void XTrigger_ScrollTrigger_Active_DoUpdate_0009D5A0(void)
+{
+    trig_rerun_as_p2(XTrigger_ScrollTrigger_Active_DoUpdate_0009D5A0_orig, "scrolling wall");
+}
+
 
 /* Rooms live in the other window's view: each window's pass recomputes the
  * rooms' visibility for its own camera (the submap table, [env +0x4C] - 4,
@@ -4671,7 +5140,7 @@ static void rooms_keep_other_view(void)
         return;
     for (i = 0; i < MAX_ROOMS; i++)
         s_vis_other[i] = MEM8(tab + i * 0x8C + 0x63);
-    if (getenv("BUFFY_COOP_WORLD_LOG")) {
+    if (ENV_WORLD_LOG()) {
         /* (the rooms each view sees, when they change: two views alternate) */
         static char last[2][96];
         static int which;
@@ -4724,7 +5193,7 @@ void EXSubMapInfoTable_UpdateSubMapLoaded_000EDD80(void)
         keep[1] = MEM32(e1 + 0x30);
         MEM32(e1 + 0x2C) = keep[0] | add[0];
         MEM32(e1 + 0x30) = keep[1] | add[1];
-        if (getenv("BUFFY_COOP_WORLD_LOG") && ((keep[0] | add[0]) != keep[0] || (keep[1] | add[1]) != keep[1])) {
+        if (ENV_WORLD_LOG() && ((keep[0] | add[0]) != keep[0] || (keep[1] | add[1]) != keep[1])) {
             static uint32_t last[2];
             if (last[0] != add[0] || last[1] != add[1])
                 fprintf(stderr, "[COOP] world: view node %d needs %08X %08X, the players' add %08X %08X\n", n1, keep[0], keep[1],
@@ -4741,12 +5210,24 @@ void EXSubMapInfoTable_UpdateSubMapLoaded_000EDD80(void)
     }
 }
 
+/* A room a player stands in is live, whatever the views see: a player's
+ * item keeps its room at +0x15C. Player 2 away from player 1 -- in one
+ * shared view, or where their own window's view did not reach the room --
+ * found its ladders (climb spots: XTrigger_PlayerActionCheck marks nobody in
+ * a dead room), monsters and press-a-button triggers dead. */
+static int room_has_player(uint32_t idx)
+{
+    uint32_t p1 = MEM32(0x26DC54), p2 = MEM32(0x26DC58);
+    return (p1 && MEM32(p1 + 0x15C) == idx) || (p2 && MEM32(p2 + 0x15C) == idx);
+}
+
 void EXItemEnv_IsSubMapVisible_000C3160(void)
 {
     uint32_t idx = MEM32(g_esp + 4);
     EXItemEnv_IsSubMapVisible_000C3160_orig();
-    if (!(g_eax & 0xFF) && idx < MAX_ROOMS && (int8_t)s_vis_other[idx] > 0 && coop_world_on())
-        g_eax = (g_eax & ~0xFFu) | 1;                    /* seen in the other window */
+    if (!(g_eax & 0xFF) && idx < MAX_ROOMS && ((int8_t)s_vis_other[idx] > 0 || room_has_player(idx))
+            && coop_world_on())
+        g_eax = (g_eax & ~0xFFu) | 1;                    /* seen in the other window, or a player is in it */
 }
 
 /* A portal (a door's opening, a room's way into the next) is visible when a
@@ -4757,8 +5238,10 @@ void EXItemEnv_IsPortalVisible_000C31C0(void)
 {
     uint32_t pt = MEM32(g_esp + 4), a = pt ? MEM16(pt) : 0xFFFF, b = pt ? MEM16(pt + 2) : 0xFFFF;
     EXItemEnv_IsPortalVisible_000C31C0_orig();
-    if (!(g_eax & 0xFF) && coop_world_on()
-            && ((a < MAX_ROOMS && (int8_t)s_vis_other[a] > 0) || (b < MAX_ROOMS && (int8_t)s_vis_other[b] > 0)))
+    if (!(g_eax & 0xFF)
+            && ((a < MAX_ROOMS && ((int8_t)s_vis_other[a] > 0 || room_has_player(a)))
+                || (b < MAX_ROOMS && ((int8_t)s_vis_other[b] > 0 || room_has_player(b))))
+            && coop_world_on())
         g_eax = (g_eax & ~0xFFu) | 1;
 }
 
@@ -4778,7 +5261,7 @@ void XTrigger_MonsterSpawn_Active_DoUpdate_00097C30(void)
     MEM32(0x26DC54) = p2;
     XTrigger_MonsterSpawn_Active_DoUpdate_00097C30_orig();
     MEM32(0x26DC54) = p1;
-    if (!(MEM32(trig + 0x48) & 0x400) && getenv("BUFFY_COOP_WORLD_LOG"))
+    if (!(MEM32(trig + 0x48) & 0x400) && ENV_WORLD_LOG())
         fprintf(stderr, "[COOP] world: player 2 set off a monster spawn (%08X)\n", trig);
     g_eax = eax;
 }

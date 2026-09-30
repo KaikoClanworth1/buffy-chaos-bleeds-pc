@@ -768,7 +768,7 @@ static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep)
             fprintf(stderr, "[WATCH] write by %s+0x%llX, value now %08X\n", sym->Name,
                     (unsigned long long)disp, *(uint32_t *)(uintptr_t)ep->ContextRecord->Dr0);
         ep->ContextRecord->Dr6 = 0;
-        if (InterlockedIncrement(&s_watch_hits) > 40)
+        if (InterlockedIncrement(&s_watch_hits) > (getenv("BUFFY_WATCH_MAX") ? atoi(getenv("BUFFY_WATCH_MAX")) : 40))
             ep->ContextRecord->Dr7 = 0;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
