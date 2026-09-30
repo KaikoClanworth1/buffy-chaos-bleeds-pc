@@ -695,7 +695,7 @@ int vk_init(void *window)
         if (score > best) {
             best = score;
             s_phys = devs[i];
-            snprintf(s_adapter, sizeof s_adapter, "%s (Vulkan)", p.deviceName);
+            snprintf(s_adapter, sizeof s_adapter, "%s", p.deviceName);   /* (the overlay names the renderer) */
             s_ubo_align = p.limits.minUniformBufferOffsetAlignment ? p.limits.minUniformBufferOffsetAlignment : 256;
         }
     }
@@ -876,7 +876,7 @@ int vk_init(void *window)
         s_dummyubo = gpu_buffer_create(256, GPU_BIND_CONSTANT, GPU_USAGE_IMMUTABLE, zero);
         s_dummyvb = gpu_buffer_create(256, GPU_BIND_VERTEX, GPU_USAGE_IMMUTABLE, zero);
     }
-    fprintf(stderr, "  [VK] %s up (depth %s%s)\n", s_adapter,
+    fprintf(stderr, "  [VK] Vulkan on %s (depth %s%s)\n", s_adapter,
             s_depth_fmt == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8", s_custom_border ? ", custom border colours" : "");
     return 1;
 }

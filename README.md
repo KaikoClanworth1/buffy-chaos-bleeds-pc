@@ -9,7 +9,7 @@ This is a native Windows port of the 2003 Xbox game *Buffy the Vampire Slayer: C
 It also adds:
 
 - **Sharp resolutions**: 720p, 1080p, 1440p and 4K, plus the original 4:3 sizes.
-- **A steady 60 fps**, with VSync on or off, from a native Vulkan / Direct3D 11 renderer with plenty of headroom.
+- **A steady 60 fps**, with VSync on or off, from a native renderer with plenty of headroom. It draws through **Vulkan** by default, or **Direct3D 11**. See [Graphics](#graphics-vulkan-and-direct3d-11).
 - **A launcher** that installs, configures and starts the game.
 - **Mods**: switch them on and off with a checkbox. The mods don't change the game files on disk.
 - **Story co-op**: a second player can join the campaign, in two windows or on a split screen.
@@ -51,6 +51,7 @@ It also adds:
 - [Steam Deck and Linux (Proton)](#steam-deck-and-linux-proton)
 - [Controls](#controls)
 - [Settings](#settings)
+- [Graphics: Vulkan and Direct3D 11](#graphics-vulkan-and-direct3d-11)
 - [Mods: what each one does](#mods-what-each-one-does)
 - [Texture packs](#texture-packs)
 - [Story co-op guide](#story-co-op-guide)
@@ -66,7 +67,7 @@ It also adds:
 | | |
 |---|---|
 | 💿 **The game** | A disc image of your own *Chaos Bleeds* **Xbox** disc, as an `.iso` or `.xiso`. The PS2 and GameCube versions won't work. |
-| 🖥️ **PC** | Windows 10 or 11 (64-bit), with a graphics card that supports Vulkan 1.3 or Direct3D 11. A **Steam Deck** or Linux PC through Proton should work too, but it's experimental: see [Steam Deck and Linux](#steam-deck-and-linux-proton). |
+| 🖥️ **PC** | Windows 10 or 11 (64-bit), with a graphics card that supports Vulkan 1.3 or Direct3D 11. Most cards from about 2016 on have Vulkan 1.3 with an up-to-date driver. Older ones use Direct3D 11 automatically. A **Steam Deck** or Linux PC through Proton should work too, but it's experimental: see [Steam Deck and Linux](#steam-deck-and-linux-proton). |
 | 💾 **Disk space** | About 4 GB for the installed game. |
 | 🎮 **Controller** | Optional. Any XInput (Xbox-style) pad works, and so does the keyboard. Co-op needs a second controller. |
 | 🎬 **FFmpeg** | Optional. It's only used once, during install, to convert the game's movies for PC. The launcher can download it for you. |
@@ -135,7 +136,7 @@ From v0.3.0 the launcher updates itself. When it starts, it checks [Releases](ht
 **Tips:**
 
 - **Controls:** the Deck's controls act as an Xbox controller. The launcher's **Controls** tab sets the keyboard and mouse.
-- **Something draws wrong:** in the launcher's **Settings**, set **Renderer** to **Emulated Xbox GPU** and compare.
+- **Renderer:** the default, **Vulkan**, goes straight to the Linux graphics driver through Proton. **Direct3D 11** goes through Proton's translation to Vulkan (DXVK). If one misbehaves, try the other in the launcher's **Settings**. If something still draws wrong, try **Emulated Xbox GPU** and compare.
 - **No movies:** the cutscene movies play through Windows Media Foundation, which depends on the Proton version. If they're skipped, try **Proton Experimental**.
 - **Updates** work under Proton: the launcher unpacks them itself, without Windows' `tar.exe`, which Proton doesn't have.
 
@@ -185,7 +186,7 @@ You can change these in the launcher's **Settings** tab. In the game, **Options 
 | **Windowed / Fullscreen** | Fullscreen is borderless. |
 | **Resolution** | 1920×1080 is the default. 1280×720, 2560×1440 and 3840×2160 are also 16:9. The original 4:3 sizes are 640×480, 1280×960, 1920×1440 and 2560×1920. Menus and movies stay 4:3, with bars at the sides. |
 | **VSync** | Waits for the monitor's refresh, so the picture doesn't tear. |
-| **Renderer** | **Vulkan** (the default) and **Direct3D 11** draw the game's Direct3D calls directly through your graphics card: the same renderer, two graphics APIs. If Vulkan 1.3 isn't available, the game uses Direct3D 11 on its own. Try Direct3D 11 if Vulkan misbehaves on your system. **Emulated Xbox GPU** is the older renderer that emulates the Xbox graphics chip. Keep it as a fallback if something looks wrong, and please report it. |
+| **Renderer** | **Vulkan (recommended)**, **Direct3D 11** or **Emulated Xbox GPU**. See [Graphics](#graphics-vulkan-and-direct3d-11). |
 | **FPS limit** | 60 (the default) or 30. The game's speed is tied to its frame rate, so it never runs above 60. |
 | **Show FPS counter** | A small frame-rate counter in the top-left corner. |
 | **Debug overlay** | A panel in the top-left corner with the frame rate, average and worst frame time, a graph of recent frame times, the renderer in use, the resolution and VSync, and your graphics card. |
@@ -194,6 +195,33 @@ You can change these in the launcher's **Settings** tab. In the game, **Options 
 | **Invert camera left / right** | Flips the right stick's horizontal direction. |
 
 <p align="center"><img src="docs/screenshots/launcher-settings.png" alt="Launcher Settings tab" width="60%"></p>
+
+---
+
+## Graphics: Vulkan and Direct3D 11
+
+The game was written for the Xbox's Direct3D 8. The port's **native renderer** takes each of the game's draw calls and draws it on your graphics card, at your resolution. It can do that through two graphics APIs, and you choose which under **Settings → Renderer**:
+
+| Renderer | When to use it |
+|---|---|
+| **Vulkan** *(the default)* | Recommended. In testing it matched Direct3D 11's speed (a steady 60 fps, about 120 fps uncapped). Under Proton it talks to the Linux graphics driver directly, and it's what a future Android version will use. |
+| **Direct3D 11** | If Vulkan doesn't start, looks wrong or runs badly on your PC. The game also switches to it on its own when the graphics driver has no Vulkan 1.3. |
+| **Emulated Xbox GPU** | A fallback that emulates the Xbox graphics chip itself. It's slower, and it only uses Direct3D 11. Use it to check whether a graphics bug comes from the native renderer. |
+
+```mermaid
+flowchart LR
+    G[The game's Direct3D 8 calls] --> N[Native renderer]
+    N --> L[GPU layer]
+    L -->|default| V[Vulkan 1.3]
+    L --> D[Direct3D 11]
+    V --> C[Your graphics card]
+    D --> C
+```
+
+- **Which one is running:** turn on **Debug overlay** in Settings. Its **RENDERER** line says Vulkan or Direct3D 11. `buffy_log.txt` says so too, and says why if Vulkan wasn't available.
+- **Shaders:** the game's shaders are compiled for each API the first time they're needed and kept in `ShaderCache\`. The release ships the common ones, so a new install doesn't stutter. Deleting the folder is safe; it fills again as you play.
+- **Everything works on both:** frame interpolation, split screen and two-window co-op, texture packs, the FPS counter, the debug overlay, screenshots and bug reports.
+- **Tested so far** on NVIDIA. If you play on AMD, Intel or a Steam Deck, a report of how Vulkan runs is very welcome.
 
 ---
 
@@ -390,10 +418,12 @@ The translated game code is **generated on your machine from your own disc**. It
 | Path | What's there |
 |---|---|
 | `port/src/` | The PC side: graphics, audio, input, movies, menus, settings, mods and co-op. |
-| `port/launcher/` | The Win32 launcher (Play, Settings, Mods and Install tabs). |
+| `port/launcher/` | The Win32 launcher, with all its tabs. |
 | `port/mods/` | The bundled mods. |
 | `port/tools/` | Regeneration, deploy and packaging scripts. |
 | `xboxrecomp/` | The static recompiler and Xbox runtime. It's vendored with changes for this port. |
+| `xboxrecomp/src/gpu/` | The GPU layer: one small API (`gpu.h`) with a Vulkan backend and a Direct3D 11 backend. The native renderer draws through it. |
+| `xboxrecomp/third_party/` | Git submodules for Vulkan: glslang (turns the HLSL shaders into SPIR-V), Vulkan-Headers, volk (loads Vulkan at run time) and the Vulkan Memory Allocator. |
 
 ---
 
@@ -402,7 +432,8 @@ The translated game code is **generated on your machine from your own disc**. It
 - **The launcher says the disc image isn't Chaos Bleeds.** Only the **Xbox** version is supported, and the image must be a full disc image, not just the game partition.
 - **There are no cutscene movies.** FFmpeg wasn't available during install. Get FFmpeg, then install again with **Convert the game's movies** ticked.
 - **The game closed unexpectedly.** `buffy_log.txt` beside the exe records why. Please include it when you report a problem.
-- **Something is drawn wrong** (missing or odd-looking graphics). In the launcher's **Settings**, set **Renderer** to **Emulated Xbox GPU** and see if it looks right there. Either way, save a bug report (click the left stick or press F12) and send it in.
+- **The game shows a black window, or closes at start.** In the launcher's **Settings**, set **Renderer** to **Direct3D 11**, and update your graphics driver. Please report it with `buffy_log.txt`: its `[VK]` lines say what Vulkan found.
+- **Something is drawn wrong** (missing or odd-looking graphics). In the launcher's **Settings**, switch **Renderer** between **Vulkan** and **Direct3D 11**, then try **Emulated Xbox GPU**, and see where it looks right. Either way, save a bug report (click the left stick or press F12) and send it in.
 - **Player 2's window is missing.** On player 1's pause menu, go to **Co-op**, then **Screens**, and choose **Two Windows** again. The window opens on the primary screen, and you can drag it from there.
 
 ---
@@ -427,4 +458,5 @@ See [CONTRIBUTORS.md](CONTRIBUTORS.md).
 - **No game material is included**: no disc image, XBE, data, audio, video or translated game code. You must own the game and supply your own disc image. The screenshots in `docs/screenshots/` were taken of the port running. They're used only to show the port, and they belong to the game's owners.
 - **Recompiler**: [xboxrecomp](https://github.com/sp00nznet/xboxrecomp) by sp00nznet, under the MIT license. See `xboxrecomp/LICENSE` and `xboxrecomp/NOTICE`.
 - **Disassembly**: [Capstone](https://www.capstone-engine.org/).
+- **Vulkan**: [glslang](https://github.com/KhronosGroup/glslang) and [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) by the Khronos Group, [volk](https://github.com/zeux/volk) by Arseny Kapoulkine, and the [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) by AMD. Each is under its own open-source license, in its folder in `xboxrecomp/third_party/`.
 - **Movie conversion**: [FFmpeg](https://ffmpeg.org/). It's downloaded separately and isn't bundled.

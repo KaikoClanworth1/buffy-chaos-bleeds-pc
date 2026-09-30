@@ -346,7 +346,8 @@ static int ov_paint(int mode, float s, uint32_t bw, uint32_t bh)
         static const char *labels[3] = { "RENDERER", "RESOLUTION", "GPU" };
         char vals[3][160];
         int i, lx = pad, vx = pad + (int)(96 * s);
-        strcpy_s(vals[0], sizeof vals[0], s_native ? "Native Direct3D 11" : "Emulated Xbox GPU");
+        strcpy_s(vals[0], sizeof vals[0], !s_native ? "Emulated Xbox GPU"
+                 : gpu_backend() == GPU_BACKEND_VULKAN ? "Vulkan" : "Direct3D 11");
         sprintf_s(vals[1], sizeof vals[1], "%u x %u   VSync %s", bw, bh, s_opt_vsync ? "on" : "off");
         strcpy_s(vals[2], sizeof vals[2], s_ov_gpu);
         for (i = 0; i < 3; i++) {
