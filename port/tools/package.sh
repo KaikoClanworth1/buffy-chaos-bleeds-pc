@@ -21,6 +21,7 @@ CRT="$(ls -d "/c/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/
 cp -f "$BIN/ShaderCache/"*.cso "$OUT/ShaderCache/" 2>/dev/null || true
 cp -f "$ROOT/GAME/ShaderCache/"*.cso "$OUT/ShaderCache/" 2>/dev/null || true
 mkdir -p "$OUT/mods" && cp -r "$ROOT/port/mods/"* "$OUT/mods/"
-( cd "$ROOT/dist" && rm -f "Buffy Chaos Bleeds PC.zip" && powershell -NoProfile -Command \
-    "Compress-Archive -Path 'Buffy Chaos Bleeds PC' -DestinationPath 'Buffy Chaos Bleeds PC.zip'" )
-echo "packaged: $OUT ($(du -sh "$OUT" | cut -f1)), zip $(du -h "$ROOT/dist/Buffy Chaos Bleeds PC.zip" | cut -f1)"
+[ -n "$VER" ] || { echo "no BUFFY_VERSION in port/CMakeLists.txt"; exit 1; }
+( cd "$ROOT/dist" && rm -f "$ZIP" && powershell -NoProfile -Command \
+    "Compress-Archive -Path 'Buffy Chaos Bleeds PC' -DestinationPath '$ZIP'" )
+echo "packaged v$VER: $OUT ($(du -sh "$OUT" | cut -f1)), dist/$ZIP $(du -h "$ROOT/dist/$ZIP" | cut -f1)"
