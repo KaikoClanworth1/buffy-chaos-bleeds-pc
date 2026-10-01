@@ -32,3 +32,16 @@ void memmove_0012EBD0(void)
 
 /* xbMovieIsPlaying is the game's own again: movies play through the XMV
  * decoder replacement in buffy_movie.c. */
+
+/* DWORD GetTickCount(void) -- 0x001289F7, XAPI.
+ *
+ * Reads the kernel's KeTickCount, which on the console the timer interrupt
+ * advances. Nothing here is an interrupt: the milliseconds come from Windows
+ * directly, the same unit and origin the kernel's copy was kept at. */
+__declspec(dllimport) unsigned long __stdcall GetTickCount(void);
+
+void GetTickCount_001289F7(void)
+{
+    g_eax = (uint32_t)GetTickCount();
+    g_esp += 4;
+}

@@ -9,7 +9,7 @@ This is a native Windows port of the 2003 Xbox game *Buffy the Vampire Slayer: C
 It also adds:
 
 - **Sharp resolutions**: 720p, 1080p, 1440p and 4K, plus the original 4:3 sizes.
-- **A steady 60 fps**, with VSync on or off, from a native renderer with plenty of headroom. It draws through **Vulkan** by default, or **Direct3D 11**. See [Graphics](#graphics-vulkan-and-direct3d-11).
+- **High frame rates**: a steady 60 fps by default, or up to 360 with the game still at its own speed, from a native renderer with plenty of headroom. It draws through **Vulkan** by default, or **Direct3D 11**. See [Graphics](#graphics-vulkan-and-direct3d-11).
 - **A launcher** that installs, configures and starts the game.
 - **Mods**: switch them on and off with a checkbox. The mods don't change the game files on disk.
 - **Story co-op**: a second player can join the campaign, in two windows or on a split screen.
@@ -91,7 +91,7 @@ It also adds:
 5. **Mods tab**: tick any mods you want. See the [mods table](#mods-what-each-one-does).
 6. **Play tab**: press **Play**.
 
-**Saves** are plain files, one per save, in the game folder's `SaveData\` folder (`BUFFY A.sav`, `BUFFY B.sav`, `BUFFY C.sav`). Copy them to back them up or to move them to another PC. The launcher's **Saves** tab backs them up and restores them. Saves from versions before 0.4 used the Xbox layout (`UDATA\`). They're converted the first time you start the game or open the Saves tab, and the originals are kept in `SaveBackups\`. `XboxData\` holds the emulated console's own files, and you can ignore it.
+**Saves** are plain files, one per save, in the game folder's `SaveData\` folder (`BUFFY A.sav`, `BUFFY B.sav`, `BUFFY C.sav`). Copy them to back them up or to move them to another PC. The launcher's **Saves** tab backs them up and restores them. Saves from versions before 0.4 used the Xbox layout (`UDATA\`). They're converted the first time you start the game or open the Saves tab, and the originals are kept in `SaveBackups\`. Nothing else is written: versions before 0.5 also kept an `XboxData\` folder of Xbox system files, which is no longer used and can be deleted.
 
 <table>
   <tr>
@@ -136,7 +136,7 @@ From v0.3.0 the launcher updates itself. When it starts, it checks [Releases](ht
 **Tips:**
 
 - **Controls:** the Deck's controls act as an Xbox controller. The launcher's **Controls** tab sets the keyboard and mouse.
-- **Renderer:** the default, **Vulkan**, goes straight to the Linux graphics driver through Proton. **Direct3D 11** goes through Proton's translation to Vulkan (DXVK). If one misbehaves, try the other in the launcher's **Settings**. If something still draws wrong, try **Emulated Xbox GPU** and compare.
+- **Renderer:** the default, **Vulkan**, goes straight to the Linux graphics driver through Proton. **Direct3D 11** goes through Proton's translation to Vulkan (DXVK). If one misbehaves, try the other in the launcher's **Settings**.
 - **No movies:** the cutscene movies play through Windows Media Foundation, which depends on the Proton version. If they're skipped, try **Proton Experimental**.
 - **Updates** work under Proton: the launcher unpacks them itself, without Windows' `tar.exe`, which Proton doesn't have.
 
@@ -186,8 +186,8 @@ You can change these in the launcher's **Settings** tab. In the game, **Options 
 | **Windowed / Fullscreen** | Fullscreen is borderless. |
 | **Resolution** | 1920×1080 is the default. 1280×720, 2560×1440 and 3840×2160 are also 16:9. The original 4:3 sizes are 640×480, 1280×960, 1920×1440 and 2560×1920. Menus and movies stay 4:3, with bars at the sides. |
 | **VSync** | Waits for the monitor's refresh, so the picture doesn't tear. |
-| **Renderer** | **Vulkan (recommended)**, **Direct3D 11** or **Emulated Xbox GPU**. See [Graphics](#graphics-vulkan-and-direct3d-11). |
-| **FPS limit** | 60 (the default) or 30. The game's speed is tied to its frame rate, so it never runs above 60. |
+| **Renderer** | **Vulkan (recommended)** or **Direct3D 11**. See [Graphics](#graphics-vulkan-and-direct3d-11). |
+| **FPS limit** | 30, 60 (the default), 90, 120, 144, 165, 240 or 360. The game keeps its own speed at any of them: the engine scales each frame's step to the frame rate, the way the console's 50 Hz PAL version ran at the right speed. With VSync on, the frame rate also stops at your monitor's refresh rate. |
 | **Show FPS counter** | A small frame-rate counter in the top-left corner. |
 | **Debug overlay** | A panel in the top-left corner with the frame rate, average and worst frame time, a graph of recent frame times, the renderer in use, the resolution and VSync, and your graphics card. |
 | **Widescreen: keep the original side-to-side view** | On by default. It shows the original view with the top and bottom trimmed, which avoids pop-in and clipping at the edges of the screen. Untick it for the game's own wider view. |
@@ -206,7 +206,6 @@ The game was written for the Xbox's Direct3D 8. The port's **native renderer** t
 |---|---|
 | **Vulkan** *(the default)* | Recommended. In testing it matched Direct3D 11's speed (a steady 60 fps, about 120 fps uncapped). Under Proton it talks to the Linux graphics driver directly, and it's what a future Android version will use. |
 | **Direct3D 11** | If Vulkan doesn't start, looks wrong or runs badly on your PC. The game also switches to it on its own when the graphics driver has no Vulkan 1.3. |
-| **Emulated Xbox GPU** | A fallback that emulates the Xbox graphics chip itself. It's slower, and it only uses Direct3D 11. Use it to check whether a graphics bug comes from the native renderer. |
 
 ```mermaid
 flowchart LR
@@ -221,6 +220,7 @@ flowchart LR
 - **Which one is running:** turn on **Debug overlay** in Settings. Its **RENDERER** line says Vulkan or Direct3D 11. `buffy_log.txt` says so too, and says why if Vulkan wasn't available.
 - **Shaders:** the game's shaders are compiled for each API the first time they're needed and kept in `ShaderCache\`. The release ships the common ones, so a new install doesn't stutter. Deleting the folder is safe; it fills again as you play.
 - **Everything works on both:** frame interpolation, split screen and two-window co-op, texture packs, the FPS counter, the debug overlay, screenshots and bug reports.
+- **No Xbox GPU is emulated.** Since 0.5 the game's Direct3D 8 runs in its own no-GPU mode, so the port doesn't emulate the Xbox graphics chip, its command buffer or its display timing at all. The old **Emulated Xbox GPU** renderer is gone; a setting that still names it starts Vulkan.
 - **Tested so far** on NVIDIA. If you play on AMD, Intel or a Steam Deck, a report of how Vulkan runs is very welcome.
 
 ---
@@ -433,7 +433,7 @@ The translated game code is **generated on your machine from your own disc**. It
 - **There are no cutscene movies.** FFmpeg wasn't available during install. Get FFmpeg, then install again with **Convert the game's movies** ticked.
 - **The game closed unexpectedly.** `buffy_log.txt` beside the exe records why. Please include it when you report a problem.
 - **The game shows a black window, or closes at start.** In the launcher's **Settings**, set **Renderer** to **Direct3D 11**, and update your graphics driver. Please report it with `buffy_log.txt`: its `[VK]` lines say what Vulkan found.
-- **Something is drawn wrong** (missing or odd-looking graphics). In the launcher's **Settings**, switch **Renderer** between **Vulkan** and **Direct3D 11**, then try **Emulated Xbox GPU**, and see where it looks right. Either way, save a bug report (click the left stick or press F12) and send it in.
+- **Something is drawn wrong** (missing or odd-looking graphics). In the launcher's **Settings**, switch **Renderer** between **Vulkan** and **Direct3D 11** and see whether it looks right in either. Either way, save a bug report (click the left stick or press F12) and send it in.
 - **Player 2's window is missing.** On player 1's pause menu, go to **Co-op**, then **Screens**, and choose **Two Windows** again. The window opens on the primary screen, and you can drag it from there.
 
 ---

@@ -369,6 +369,19 @@ static struct {
 } s_last_pipe;
 static uint32_t s_state_epoch = 1;
 
+/* The bindings the command buffer already has: a draw pushes only the
+ * descriptors that changed (push descriptors keep the rest) and binds only
+ * the vertex / index buffers that moved. valid = 0 at each new one. */
+static struct {
+    int valid;
+    VkDescriptorBufferInfo bi[2];
+    VkDescriptorImageInfo ii[12];
+    VkBuffer vb[16];
+    VkDeviceSize voff[16], vstride[16];
+    VkBuffer ib;
+    VkDeviceSize ioff;
+} s_bound;
+
 /* Buffer copies (gpu_buffer_copy: frame interpolation records every draw's
  * vertices and indices with one) cannot be recorded inside rendering, and
  * ending it for each would reload the targets every draw: they are queued
@@ -433,6 +446,7 @@ static void begin_frame(void)
     vkBeginCommandBuffer(f->cmd, &bi);
     s_bound_pipe = VK_NULL_HANDLE;
     s_dyn.valid = 0;
+    memset(&s_bound, 0, sizeof s_bound);
 }
 
 /* Submits what is recorded (waiting on the acquired swap chain images,
@@ -633,6 +647,8 @@ static VkDeviceSize level_bytes(GpuFormat f, uint32_t w, uint32_t h, uint32_t *r
 
 static GpuTexture *make_dummy(int cube);
 
+static void vk_pcache_init(void);           /* (gpu_vk_draw.inc) */
+
 int vk_init(void *window)
 {
     VkApplicationInfo app;
@@ -777,6 +793,7 @@ int vk_init(void *window)
     }
     volkLoadDevice(s_dev);
     vkGetDeviceQueue(s_dev, s_qfam, 0, &s_queue);
+    vk_pcache_init();                         /* pipelines built in earlier runs */
     {
         VmaVulkanFunctions vf;
         VmaAllocatorCreateInfo ai;

@@ -286,7 +286,8 @@ static int psh_generate(const PsKey *k, char *out, int cap)
     b.p = out; b.n = 0; b.cap = cap;
     out[0] = 0;
     sb_add(&b, "%s", s_psh_head);
-    sb_add(&b, "float4 ps(P i) : SV_Target {\n");
+    sb_add(&b, "float4 ps(P i, out float pdepth : SV_Depth) : SV_Target {\n");
+    sb_add(&b, "  pdepth = i.fog.z > 0.5 ? i.fog.y : i.p.z;\n");    /* (W-buffering: nv2a_pb_vsh.inc) */
     sb_add(&b, "  float4 zr = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0;\n");
     sb_add(&b, "  float4 v0 = i.c0, v1 = i.c1;\n");
     sb_add(&b, "  float4 fogr = float4(fogc.rgb, saturate(i.fog.x));\n");

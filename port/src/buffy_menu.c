@@ -625,7 +625,19 @@ int buffy_pc_line_press(uint32_t btn, int line, uint32_t mask, int left, int any
     case 0: buffy_settings_step_res(left ? -1 : 1); break;
     case 1: buffy_settings_set_vsync(!buffy_settings_vsync()); break;
     case 2: buffy_settings_set_fullscreen(!buffy_settings_fullscreen()); break;
-    case 3: buffy_settings_set_fps_limit(buffy_settings_fps_limit() == 60 ? 30 : 60); break;
+    case 3: {
+        /* the next listed limit up (Right / A) or down (Left), wrapping */
+        static const int k_fps[] = { 30, 60, 90, 120, 144, 165, 240, 360 };
+        int n = (int)(sizeof k_fps / sizeof k_fps[0]), i = 0, cur = buffy_settings_fps_limit();
+        while (i < n - 1 && k_fps[i] < cur)
+            i++;
+        if (left)
+            i = k_fps[i] < cur ? i : (i + n - 1) % n;
+        else
+            i = k_fps[i] > cur ? i : (i + 1) % n;
+        buffy_settings_set_fps_limit(k_fps[i]);
+        break;
+    }
     case 4: buffy_settings_set_show_fps(!buffy_settings_show_fps()); break;
     default: buffy_settings_set_overlay(!buffy_settings_overlay()); break;
     }

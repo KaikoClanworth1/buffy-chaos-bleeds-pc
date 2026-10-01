@@ -15,19 +15,21 @@
  */
 
 /* getenv, remembered: debug switches are checked on every draw, and the
- * CRT's getenv walks the whole environment each time. */
+ * CRT's getenv walks the whole environment each time. Keyed by the name's
+ * address (every caller passes a string literal): one pointer compare a
+ * lookup -- a list searched with strcmp cost 6% of the game thread. */
 static const char *nenv(const char *name)
 {
-    static struct { const char *name; const char *value; } cache[48];
-    static int n;
-    int i;
-    for (i = 0; i < n; i++)
-        if (cache[i].name == name || !strcmp(cache[i].name, name))
-            return cache[i].value;
-    if (n < 48) {
-        cache[n].name = name;
-        cache[n].value = getenv(name);
-        return cache[n++].value;
+    static struct { const char *name; const char *value; } tab[256];
+    unsigned h = (unsigned)(((uintptr_t)name >> 3) * 2654435761u) >> 24, i;
+    for (i = 0; i < 256; i++, h = (h + 1) & 255) {
+        if (tab[h].name == name)
+            return tab[h].value;
+        if (!tab[h].name) {
+            tab[h].value = getenv(name);
+            tab[h].name = name;
+            return tab[h].value;
+        }
     }
     return getenv(name);
 }
@@ -78,6 +80,7 @@ typedef struct {
     int pixel_shader;                  /* the combiner registers in rs[0..56] are live */
     const uint32_t *rs;                /* D3D__RenderState */
     const uint32_t *tss;               /* D3D__TextureState, [4][32] */
+    float clip_min, clip_max;          /* the depth range D3D clips to (W- or Z-buffer units); 0, 0: unknown */
 } NativeDraw;
 
 static uint32_t s_nvp_code[VP_SLOTS][4];     /* the program memory, as loaded */
@@ -387,7 +390,8 @@ static int nff_generate(const NFfKey *k, char *out, int cap)
     b.p = out; b.n = 0; b.cap = cap;
     out[0] = 0;
     sb_add(&b, "%s", s_psh_head);
-    sb_add(&b, "float4 ps(P i) : SV_Target {\n");
+    sb_add(&b, "float4 ps(P i, out float pdepth : SV_Depth) : SV_Target {\n");
+    sb_add(&b, "  pdepth = i.fog.z > 0.5 ? i.fog.y : i.p.z;\n");    /* (W-buffering: nv2a_pb_vsh.inc) */
     sb_add(&b, "  float4 t0 = 0, t1 = 0, t2 = 0, t3 = 0, tmp = 0;\n");
     for (st = 0; st < 4; st++)
         if (k->bound & (1u << st))
@@ -1222,7 +1226,7 @@ int nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_te
     if (ibig_reserve(s_ncur.n)) {
         /* 1: every draw's constants, blended where the draw matches one of the
          * last frame's, into the two big buffers (one map each) */
-        struct { void *pData; } mv, mp;
+        struct { void *pData; } mv = { NULL }, mp = { NULL };
         int pj = 0, ok = 1, still = s_ncur.n == s_nprev.n;   /* nothing moved (a paused game) */
         if (!(mv.pData = gpu_buffer_map(s_ibig_vs, GPU_MAP_DISCARD)))
             ok = 0;
@@ -1572,6 +1576,21 @@ static int nv2a_native_draw_one(const NativeDraw *d, GpuTexture *rt, GpuTexture 
         else if (v) srv[st] = v;
         if (v) bound |= 1u << st;
         smp[st] = v ? tx_sampler(st, mips) : s_gsamp[0];
+        if (v && nenv("BUFFY_NATIVE_FILTLOG")) {
+            /* (testing) how textured draws sample, every 600 draws:
+             * [has mips][NV2A min filter 0..7] */
+            static unsigned n[3][8], total;
+            unsigned minf = (tex_reg(st, 0x1B14) >> 16) & 7, k;
+            n[mips > 2 ? 2 : mips][minf]++;
+            if (++total % 600 == 0) {
+                fprintf(stderr, "[FILT] no-mips:");
+                for (k = 0; k < 8; k++) fprintf(stderr, " %u", n[0][k]);
+                fprintf(stderr, " | mips:");
+                for (k = 0; k < 8; k++) fprintf(stderr, " %u", n[1][k]);
+                fprintf(stderr, " | pack: %u\n", n[2][0] + n[2][1] + n[2][2] + n[2][3] + n[2][4] + n[2][5] + n[2][6] + n[2][7]);
+                memset(n, 0, sizeof n);
+            }
+        }
         cb[8 + st * 4] = norm[0];
         cb[9 + st * 4] = norm[1];
     }
@@ -1699,9 +1718,18 @@ static int nv2a_native_draw_one(const NativeDraw *d, GpuTexture *rt, GpuTexture 
              * above 0; Z mode's is 0..2^24). */
             static float wmin, wmax;
             float cmin, cmax;
-            memcpy(&cmin, &KEL(0x0394), 4);
-            memcpy(&cmax, &KEL(0x0398), 4);
-            if ((KEL(0x0290) & 0x10000) && cmin > 0.0f && cmax > cmin)
+            int wmode;
+            if (d->clip_max > 0.0f) {
+                /* the title's D3D said (device state, as it draws) */
+                cmin = d->clip_min;
+                cmax = d->clip_max;
+                wmode = d->rs[NRS_ZENABLE] == 2;
+            } else {
+                memcpy(&cmin, &KEL(0x0394), 4);
+                memcpy(&cmax, &KEL(0x0398), 4);
+                wmode = (KEL(0x0290) & 0x10000) != 0;
+            }
+            if (wmode && cmin > 0.0f && cmax > cmin)
                 wmin = cmin, wmax = cmax;
             if (d->rs[NRS_ZENABLE] == 2 && wmax > wmin && !nenv("BUFFY_NATIVE_NOW")) {
                 k[192][1] = 1.0f;
@@ -1759,7 +1787,13 @@ static int nv2a_native_draw_one(const NativeDraw *d, GpuTexture *rt, GpuTexture 
         uint32_t key[4];
         int i;
         key[0] = (d->index_va ? 1u : 0u) | d->rs[NRS_ZENABLE] << 4 | ((KEL(0x0290) >> 16) & 1) << 8 | (uses_viewport ? 1u : 0u) << 12;
-        key[1] = KEL(0x0394); key[2] = KEL(0x0398); key[3] = 0;
+        if (d->clip_max > 0.0f) {
+            memcpy(&key[1], &d->clip_min, 4);
+            memcpy(&key[2], &d->clip_max, 4);
+        } else {
+            key[1] = KEL(0x0394); key[2] = KEL(0x0398);
+        }
+        key[3] = 0;
         for (i = 0; i < n && memcmp(seen[i], key, 12); i++) ;
         if (i == n && n < 32) {
             float cmin, cmax;
@@ -1768,6 +1802,33 @@ static int nv2a_native_draw_one(const NativeDraw *d, GpuTexture *rt, GpuTexture 
             fprintf(stderr, "  [NATIVE] w: indexed %u zenable %u theirs W %u viewport %u clip %g..%g c58z %g c59z %g frame %u\n",
                     key[0] & 1, d->rs[NRS_ZENABLE], (key[0] >> 8) & 1, (key[0] >> 12) & 1, cmin, cmax,
                     s_nconst[58][2], s_nconst[59][2], s_frame_no);
+        }
+    }
+    if (nenv("BUFFY_NATIVE_WPOS") && !d->passthrough && d->rs[NRS_ZENABLE] == 2) {
+        /* (testing) one vertex of a W-buffered draw through the CPU vertex
+         * program interpreter: its oPos against the clip range */
+        static int shown;
+        if (shown < 40 && (s_frame_no % 61) == 0) {
+            float in[16][4], o[13][4], cmin = d->clip_min, cmax = d->clip_max;
+            uint32_t idx = 0;
+            int a;
+            shown++;
+            memcpy(s_vp_code, s_nvp_code, sizeof s_vp_code < sizeof s_nvp_code ? sizeof s_vp_code : sizeof s_nvp_code);
+            memcpy(s_vp_const, s_nconst, sizeof s_vp_const < sizeof s_nconst ? sizeof s_vp_const : sizeof s_nconst);
+            s_vp_start = d->vp_start;
+            s_vp_dirty = 1;
+            if (d->index_va)
+                idx = *(const uint16_t *)((const uint8_t *)xbox_GetMemoryOffset() + d->index_va);
+            for (a = 0; a < 16; a++) {
+                in[a][0] = in[a][1] = in[a][2] = 0.0f; in[a][3] = 1.0f;
+                if (d->attr[a].fmt)
+                    ndraw_fetch(&d->attr[a], idx, in[a]);
+            }
+            memset(o, 0, sizeof o);
+            vp_run(in, o);
+            fprintf(stderr, "  [WPOS] frame %u pos %g %g %g %g -> oPos %g %g %g %g | clip %g..%g c58 %g %g %g c59 %g %g %g\n",
+                    s_frame_no, in[0][0], in[0][1], in[0][2], in[0][3], o[0][0], o[0][1], o[0][2], o[0][3], cmin, cmax,
+                    s_nconst[58][0], s_nconst[58][1], s_nconst[58][2], s_nconst[59][0], s_nconst[59][1], s_nconst[59][2]);
         }
     }
     if (nenv("BUFFY_NATIVE_ZLOG")) {

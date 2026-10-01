@@ -55,3 +55,12 @@ else()
 endif()
 
 target_compile_definitions(xbox_kernel PRIVATE $<$<CONFIG:Debug>:_DEBUG>)
+
+# XBOXRECOMP_GPU_EMULATION=OFF: for a title whose Xbox D3D runs without a GPU
+# (D3D__NullHardware) and draws through a native renderer. No pushbuffer
+# puller or executor, no register or vblank threads, no write-1-to-clear
+# trap: the code is not referenced, so the linker leaves it out.
+option(XBOXRECOMP_GPU_EMULATION "Emulate the NV2A's pushbuffer, registers and vblank" ON)
+if(NOT XBOXRECOMP_GPU_EMULATION)
+    target_compile_definitions(xbox_kernel PRIVATE XBOXRECOMP_NO_GPU_EMULATION)
+endif()

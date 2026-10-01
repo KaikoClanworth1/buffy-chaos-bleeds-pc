@@ -31,6 +31,8 @@
  */
 
 #include <windows.h>
+
+int recomp_dispatch_init(void);           /* (recomp/gen/recomp_dispatch.c) */
 #include <dbghelp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,20 +40,12 @@
 #include <string.h>
 #include <math.h>
 
-/* xboxrecomp runtime headers */
-#include <xbox/xboxrecomp.h>
+/* xboxrecomp runtime headers: the kernel replacement and the memory
+ * layout (the game's own D3D, DirectSound and input are replaced in this
+ * port, so none of the runtime's compatibility layers are linked) */
+#include "kernel.h"
+#include "xbox_memory_layout.h"
 #include "buffy_settings.h"
-
-/*
- * If xboxrecomp.h is not an umbrella header in your setup, include
- * the individual headers directly:
- *
- * #include "kernel.h"
- * #include "xbox_memory_layout.h"
- * #include "d3d8_xbox.h"
- * #include "dsound_xbox.h"
- * #include "xinput_xbox.h"
- */
 
 /* ── Global register state (defined in xbox_memory_layout.c) ── */
 
@@ -244,85 +238,6 @@ static LONG watch_handle(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* ── GPU software methods ─────────────────────────────────────
- * Xbox D3D signals fence completion, BlockOnTime wake-ups and flips through
- * NV097_NO_OPERATION with a parameter; on hardware that interrupt reaches
- * CMiniport::SoftwareMethod(data) via ISR -> DPC. Calling it directly (on the
- * runtime's interrupt thread) gives the same effect without depending on the
- * emulated interrupt mask, which D3D's own masking made unreliable here.
- * thiscall: ecx = CMiniport (the context D3D registered for the GPU vector),
- * one stack argument, callee pops it (ret 4). */
-extern void D3D_CMiniport_SoftwareMethod_0013F820(void);
-extern void xbox_SetSoftwareMethodHook(void (*hook)(uint32_t, uint32_t, uint32_t));
-
-extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
-extern void xbox_FramebufferWindowStart(void);
-
-/* Screenshot of the presented frame: 640x480 A8R8G8B8 as a 32-bit BMP. */
-static void buffy_screenshot(uint32_t fb_va)
-{
-    static DWORD last;
-    static int n;
-    const char *dir = getenv("BUFFY_SHOTS");
-    char path[MAX_PATH];
-    FILE *f;
-    int y;
-    uint32_t hdr[13];
-
-    if (!dir || GetTickCount() - last < 3000)
-        return;
-    last = GetTickCount();
-    sprintf_s(path, sizeof path, "%s\\shot%03d.bmp", dir, n++);
-    f = fopen(path, "wb");
-    if (!f)
-        return;
-    memset(hdr, 0, sizeof hdr);
-    fwrite("BM", 1, 2, f);
-    hdr[0] = 54 + 640 * 480 * 4; hdr[2] = 54; hdr[3] = 40; hdr[4] = 640;
-    hdr[5] = (uint32_t)-480;                       /* top-down */
-    hdr[6] = 1 | (32 << 16);
-    fwrite(hdr, 4, 13, f);
-    for (y = 0; y < 480; y++)
-        fwrite((const uint8_t *)((uintptr_t)g_xbox_mem_offset + fb_va + (uint32_t)y * 2560u),
-               4, 640, f);
-    fclose(f);
-}
-
-static void buffy_sw_method(uint32_t method, uint32_t data, uint32_t miniport)
-{
-    if (method != 0x100 || !miniport)
-        return;
-    /* Flip: the surface D3D presents. Show it and, if asked, save it. */
-    if ((data & 0x1F) == 1) {
-        static int window;
-        uint32_t fb_va = 0x80000000u | ((data >> 5) & 0x0FFFFFF0u);
-        xbox_FramebufferWindowSet(fb_va, 2560);
-        if (!window) {
-            window = 1;
-            xbox_FramebufferWindowStart();
-        }
-        if (getenv("RECOMP_GPU") && getenv("RECOMP_GPU")[0] == '0')
-            buffy_screenshot(fb_va);
-    }
-    {
-        uint32_t esp0 = g_esp;
-        /* SoftwareMethod(data) is __thiscall, `ret 4`. The stack drift once
-         * seen here came from a skipped null callback inside it (fixed in the
-         * translator); the restore below stays as a guard. */
-        g_esp -= 4; *(uint32_t *)((uintptr_t)g_xbox_mem_offset + g_esp) = data;
-        g_esp -= 4; *(uint32_t *)((uintptr_t)g_xbox_mem_offset + g_esp) = 0;  /* return address */
-        g_ecx = miniport;
-        D3D_CMiniport_SoftwareMethod_0013F820();
-        if (g_esp != esp0) {
-            static int shown;
-            if (shown++ < 5)
-                fprintf(stderr, "  [SWM] esp imbalance: before %08X after %08X (data %08X)\n",
-                        esp0, g_esp, data);
-            g_esp = esp0;
-        }
-    }
-}
-
 /* Hex-dump guest memory around every register that points into mapped RAM.
  * Most bring-up crashes are a bad pointer read out of a structure, and the
  * structure is usually what one of the registers still points at. */
@@ -345,33 +260,15 @@ static void dump_guest_regs_memory(void)
     }
 }
 
-/* The emulated APU.
- *
- * Two entry points that had no callers anywhere in the tree. apu_mmio_hook.c
- * documents apu_hook_handle_mmio as "called from VEH in main.c" and no main.c
- * called it; apu_decode_and_handle's first line is `if (!g_apu_state) return
- * false` and nothing assigned g_apu_state. So with RECOMP_AC97_READY set the
- * APU's registers were unmapped to be trapped, and every trap was then
- * declined and surfaced as an access violation on the first register
- * DirectSound touched.
- *
- * Declared rather than included so this does not depend on src/apu being on
- * the include path. */
-typedef struct MCPXAPUState MCPXAPUState;
-extern MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr);
-extern MCPXAPUState *g_apu_state;
-extern bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
-                                 uint32_t fault_xbox_va, int is_write);
-
-/* The trapped span, matching what MemoryLayoutInit unmaps: the APU's own
- * 512 KB, not the whole MCPX aperture. AC'97 above it stays plain memory,
- * which is what the codec-ready bit needs. */
-#define APU_TRAP_BASE 0xFE800000u
-#define APU_TRAP_END  0xFE880000u
-
-extern void xbox_OhciInit(void);
-extern int  xbox_OhciOwnsAddress(uint32_t xbox_va);
-extern int  xbox_OhciHandleMmio(void *ctx, uint32_t xbox_va);
+/* The runtime's optional framebuffer window (for its software rasteriser)
+ * and host video player (RECOMP_FMV_HOST) live in its xbox_video library,
+ * which this port does not link: the game's window is the GPU layer's and
+ * its movies play through buffy_movie.c. The kernel bridge's calls into
+ * them land here. */
+void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch) { (void)fb_va; (void)pitch; }
+void xbox_FramebufferWindowStart(void) {}
+int  xbox_VideoPlayFile(const char *host_path) { (void)host_path; return 0; }
+int  xbox_VideoIsPlaying(void) { return 0; }
 
 static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 {
@@ -382,46 +279,6 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
     }
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         uintptr_t fault_addr = ep->ExceptionRecord->ExceptionInformation[1];
-
-        /*
-         * GPU register probe at 0xFD000000 range.
-         * Some games probe NV2A registers directly. On real hardware this
-         * returns GPU state; here we just skip the instruction.
-         * TODO: Implement mini x86-64 decoder for instruction skipping,
-         * or connect to the xbox_nv2a library for proper handling.
-         */
-        if (fault_addr >= 0xFD000000 && fault_addr < 0xFE000000) {
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-
-        /* USB host controllers -> the emulated OHCI (controllers). */
-        {
-            uint32_t xbox_va =
-                (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset);
-            if (xbox_OhciOwnsAddress(xbox_va)
-                    && xbox_OhciHandleMmio(ep->ContextRecord, xbox_va))
-                return EXCEPTION_CONTINUE_EXECUTION;
-        }
-
-        /* APU registers -> the emulated APU.
-         *
-         * The other half of RECOMP_AC97_READY: reporting the codec ready is
-         * what lets DirectSoundCreate past its first gate, and from there it
-         * drives the APU directly, so the registers have to fault to be seen.
-         * "Handled" means the access was decoded and the instruction stepped
-         * over, so execution resumes instead of unwinding. */
-        {
-            uint32_t xbox_va =
-                (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset);
-
-            if (xbox_va >= APU_TRAP_BASE && xbox_va < APU_TRAP_END
-                    && apu_hook_handle_mmio(
-                           ep->ContextRecord, fault_addr, xbox_va,
-                           ep->ExceptionRecord->ExceptionInformation[0]
-                               ? 1 : 0)) {
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-        }
 
         fprintf(stderr, "[CRASH] Access violation at RIP=0x%llX, fault addr=0x%llX (%s)\n",
             (unsigned long long)ep->ContextRecord->Rip,
@@ -512,6 +369,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         fprintf(stderr, "[PLATFORM] %s\n", buffy_platform_text());
         fprintf(stderr, "  [THREAD] %lu: game\n", GetCurrentThreadId());
     }
+    /* The console's own folders (XboxData: T:, Z:, the hard disk) only when
+     * the game writes something there -- normally never: saves are SaveData
+     * (buffy_saves.c), and T: / U: are not linked (XapiSetupPerTitleDriveLetters). */
+    if (!getenv("RECOMP_LAZY_DIRS"))
+        _putenv("RECOMP_LAZY_DIRS=1");
     resolve_game_paths();
 
     /* Audio: no emulated sound chip. DirectSound is replaced whole
@@ -519,21 +381,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * DownloadEffectsImage and every buffer call), so nothing reaches the
      * MCPX APU, the AC'97 codec or the DSP mailbox; the emulated APU and its
      * register traps (RECOMP_AC97_READY, RECOMP_APU_DSP_ACK) stay off. */
-    /* GPU: consume the pushbuffer on its own FIFO thread (fences, semaphores,
-     * software methods) and deliver a 60 Hz vblank; D3D's Swap depends on both. */
-    if (!getenv("RECOMP_PB_EXEC"))
-        _putenv("RECOMP_PB_EXEC=1");
-    if (!getenv("RECOMP_VBLANK"))
-        _putenv("RECOMP_VBLANK=1");
+    /* GPU: none to emulate. The game draws through the native renderer
+     * (buffy_native.c), and the Xbox D3D library runs in its own no-GPU mode
+     * (D3D__NullHardware, set below): the pushbuffer it still writes is
+     * retired at once, and nothing waits on GPU registers, fences or a
+     * vertical blank (buffy_gpuwait.c). So no pushbuffer thread, no vblank
+     * interrupt and no register thread. */
+    _putenv("RECOMP_PB_EXEC=0");
+    _putenv("RECOMP_VBLANK=0");
+    _putenv("RECOMP_NV2A_ACK=0");
+    /* Memory as a PC program has it: the game's 4 GB address space is one
+     * block the system places (xbox_memory_layout.c), without the Xbox's
+     * hardware aliases -- RAM repeated every 64 MB (the memory bus wrap) and
+     * the GPU's tiled view of it at 0xF0000000. The game uses neither (the
+     * story, co-op, movies and all three renderers run without them); set
+     * RECOMP_NO_MIRRORS=0 / RECOMP_NO_TILED=0 to bring one back. */
+    if (!getenv("RECOMP_NO_MIRRORS"))
+        _putenv("RECOMP_NO_MIRRORS=1");
+    if (!getenv("RECOMP_NO_TILED"))
+        _putenv("RECOMP_NO_TILED=1");
+    /* Nor the Xbox's other device blocks: the MCPX (audio, USB, network --
+     * DirectSound, controllers and saves are answered above it) and the
+     * BIOS flash. RECOMP_NO_MCPX=0 / RECOMP_NO_FLASH=0 bring one back. */
+    if (!getenv("RECOMP_NO_MCPX"))
+        _putenv("RECOMP_NO_MCPX=1");
+    if (!getenv("RECOMP_NO_FLASH"))
+        _putenv("RECOMP_NO_FLASH=1");
     /* RECOMP_USB (the OHCI/USB wire model) stays opt-in: controllers are
      * answered at the XAPI level in buffy_input.c. */
     /* The game window (presents the flipped surface). Test harnesses set
      * BUFFY_NO_WINDOW to stay headless. */
-    /* The game window comes from the Direct3D 11 backend; the plain GDI
-     * framebuffer window is only for the software rasteriser (RECOMP_GPU=0). */
-    if (getenv("RECOMP_GPU") && getenv("RECOMP_GPU")[0] == '0'
-            && !getenv("RECOMP_FB_WINDOW") && !getenv("BUFFY_NO_WINDOW"))
-        _putenv("RECOMP_FB_WINDOW=1");
+    /* The game window comes from the GPU layer (Vulkan or Direct3D 11). */
     buffy_settings_load();          /* resolution, vsync, fullscreen */
     {
         void buffy_debug_start(void);
@@ -583,22 +461,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_xbox_mem_offset = xbox_GetMemoryOffset();
     printf("Xbox memory mapped. Offset: 0x%llX\n", (unsigned long long)g_xbox_mem_offset);
     watch_init();
+    /* The Xbox D3D library's own no-GPU mode, D3D__NullHardware (0x145030,
+     * BSS): KickOff retires the pushbuffer at once instead of handing it to
+     * a GPU (buffy_gpuwait.c). */
+    *(volatile uint32_t *)((uintptr_t)g_xbox_mem_offset + 0x145030u) = 1;
     {
         void buffy_coop_memory_patch(void);
         buffy_coop_memory_patch();  /* ...and a bigger game heap in it */
-    }
-
-    /* Bring up the emulated APU.
-     *
-     * Gated on the same variable that unmaps its registers, because the two
-     * halves are useless apart: a trap with no model declines every access,
-     * and a model nothing traps into never sees a register. The APU walks
-     * Xbox physical RAM to find voice buffers, so it gets the guest RAM
-     * base. */
-    if (getenv("RECOMP_AC97_READY")) {
-        g_apu_state = mcpx_apu_init_standalone((uint8_t *)xbox_GetMemoryBase());
-        fprintf(stderr, "[BOOT] emulated APU %s\n",
-                g_apu_state ? "up" : "FAILED to initialise");
     }
 
     /* Step 3: Initialize Xbox kernel */
@@ -614,8 +483,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Step 5: Initialize kernel bridge (thunk table in Xbox memory) */
     printf("Initializing kernel bridge...\n");
     xbox_kernel_bridge_init();
-    xbox_SetSoftwareMethodHook(buffy_sw_method);
-    xbox_OhciInit();   /* controllers: RECOMP_USB */
 
     /* Step 6: Initialize stack */
     g_esp = XBOX_STACK_TOP;

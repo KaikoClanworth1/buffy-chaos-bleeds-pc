@@ -81,6 +81,138 @@ typedef struct { PipeKey key; VkPipeline pipe; int used; } PipeEntry;
 static PipeEntry s_pipes[PIPE_CACHE];
 static VkPipelineCache s_pcache;
 
+/* ── the pipeline cache, kept on disk ──────────────────────────────────────
+ *
+ * A pipeline is the driver's compiled form of a shader pair and its fixed
+ * state, built the first time a draw needs that combination -- the hitch a
+ * new effect or material costs. The driver's cache of them is saved as
+ * ShaderCache\vk_pipelines.bin (beside the .spv shaders) and loaded at
+ * start, so the next run builds each one from it instead. A file from
+ * another GPU or driver is not used: its header names the device and the
+ * driver's cache version (pipelineCacheUUID). Saved when pipelines were
+ * added, at most every 10 s (a game closed with Alt+F4 keeps all but the
+ * last few seconds' worth). BUFFY_NO_PIPELINE_CACHE=1 turns it off. */
+static int s_pcache_dirty;
+static uint64_t s_pcache_saved_ms;
+static unsigned s_pipes_built;                /* this run, and their build time (logged with each save) */
+static double s_pipes_ms;
+
+static double pcache_now_ms(void)
+{
+#if defined(_WIN32)
+    static LARGE_INTEGER f;
+    LARGE_INTEGER c;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+#endif
+}
+
+static int pcache_path(char *path, size_t n)
+{
+#if defined(_WIN32)
+    char *slash;
+    GetModuleFileNameA(NULL, path, (DWORD)n);
+    slash = strrchr(path, '\\');
+    if (!slash)
+        return 0;
+    snprintf(slash + 1, n - (size_t)(slash + 1 - path), "ShaderCache");
+    CreateDirectoryA(path, NULL);
+    snprintf(slash + 1, n - (size_t)(slash + 1 - path), "ShaderCache\\vk_pipelines.bin");
+    return 1;
+#else
+    const char *dir = getenv("GPU_SHADER_CACHE");
+    if (!dir || !*dir)
+        return 0;
+    snprintf(path, n, "%s/vk_pipelines.bin", dir);
+    return 1;
+#endif
+}
+
+static void vk_pcache_init(void)
+{
+    VkPipelineCacheCreateInfo ci;
+    VkPhysicalDeviceProperties p;
+    char path[512];
+    void *data = NULL;
+    size_t size = 0;
+    FILE *f;
+    if (getenv("BUFFY_NO_PIPELINE_CACHE"))
+        return;
+    vkGetPhysicalDeviceProperties(s_phys, &p);
+    if (pcache_path(path, sizeof path) && (f = fopen(path, "rb")) != NULL) {
+        long n;
+        fseek(f, 0, SEEK_END);
+        n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (n > 32 && (data = malloc((size_t)n)) != NULL && fread(data, 1, (size_t)n, f) == (size_t)n) {
+            /* VkPipelineCacheHeaderVersionOne: length, version, vendor, device, uuid[16] */
+            const uint32_t *h = (const uint32_t *)data;
+            if (h[0] >= 32 && h[1] == VK_PIPELINE_CACHE_HEADER_VERSION_ONE && h[2] == p.vendorID
+                    && h[3] == p.deviceID && !memcmp(h + 4, p.pipelineCacheUUID, VK_UUID_SIZE))
+                size = (size_t)n;
+        }
+        fclose(f);
+    }
+    memset(&ci, 0, sizeof ci);
+    ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    ci.initialDataSize = size;
+    ci.pInitialData = size ? data : NULL;
+    if (vkCreatePipelineCache(s_dev, &ci, NULL, &s_pcache) != VK_SUCCESS) {
+        ci.initialDataSize = 0;                  /* (a file the driver would not take) */
+        ci.pInitialData = NULL;
+        if (vkCreatePipelineCache(s_dev, &ci, NULL, &s_pcache) != VK_SUCCESS)
+            s_pcache = VK_NULL_HANDLE;
+    }
+    fprintf(stderr, "  [VK] pipeline cache: %s (%zu KB)\n", size ? "loaded" : "new", size / 1024);
+    free(data);
+}
+
+/* Write the cache if pipelines were added and the last write was over 10 s
+ * ago (or now, with force). */
+static void vk_pcache_save(int force)
+{
+    char path[512], tmp[520];
+    size_t size = 0;
+    void *data;
+    FILE *f;
+    uint64_t now;
+#if defined(_WIN32)
+    now = GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    now = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+#endif
+    if (!s_pcache || !s_pcache_dirty || (!force && now - s_pcache_saved_ms < 10000))
+        return;
+    s_pcache_saved_ms = now;
+    s_pcache_dirty = 0;
+    if (!pcache_path(path, sizeof path) || vkGetPipelineCacheData(s_dev, s_pcache, &size, NULL) != VK_SUCCESS || !size)
+        return;
+    if (!(data = malloc(size)))
+        return;
+    if (vkGetPipelineCacheData(s_dev, s_pcache, &size, data) == VK_SUCCESS) {
+        snprintf(tmp, sizeof tmp, "%s.tmp", path);
+        if ((f = fopen(tmp, "wb")) != NULL) {
+            int ok = fwrite(data, 1, size, f) == size;
+            fclose(f);
+#if defined(_WIN32)
+            if (ok) MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+#else
+            if (ok) rename(tmp, path);
+#endif
+            fprintf(stderr, "  [VK] pipeline cache saved (%zu KB): %u pipelines built this run, %.0f ms\n",
+                    size / 1024, s_pipes_built, s_pipes_ms);
+        }
+    }
+    free(data);
+}
+
 static uint32_t pipe_hash(const PipeKey *k)
 {
     const uint8_t *p = (const uint8_t *)k;
@@ -152,6 +284,7 @@ static VkStencilOp vkstencil(GpuStencilOp o)
 
 static VkPipeline make_pipeline(const PipeKey *k, GpuShader *vs_, GpuShader *ps_, GpuLayout *il_)
 {
+    double t0;
     VkPipelineShaderStageCreateInfo stages[2];
     VkVertexInputBindingDescription binds[16];
     VkVertexInputAttributeDescription attrs[16];
@@ -267,12 +400,16 @@ static VkPipeline make_pipeline(const PipeKey *k, GpuShader *vs_, GpuShader *ps_
     pi.pColorBlendState = &cb;
     pi.pDynamicState = &dy;
     pi.layout = s_pl;
+    t0 = pcache_now_ms();
     if (vkCreateGraphicsPipelines(s_dev, s_pcache, 1, &pi, NULL, &p) != VK_SUCCESS) {
         static int shown;
         if (shown++ < 5)
             fprintf(stderr, "  [VK] pipeline creation failed\n");
         return VK_NULL_HANDLE;
     }
+    s_pipes_ms += pcache_now_ms() - t0;
+    s_pipes_built++;
+    s_pcache_dirty++;                             /* (saved with the next present, vk_pcache_save) */
     return p;
 }
 
@@ -494,6 +631,7 @@ static int draw_setup(void)
     }
     PROF_END(2, PR_CB);
     PROF_BEGIN(3);
+    memset(ii, 0, sizeof ii);                            /* (padding too: compared with the last draw's) */
     for (i = 0; i < 8; i++) {
         GpuTexture *t = st.tex[i];
         cube = i >= 4;
@@ -511,17 +649,28 @@ static int draw_setup(void)
         ii[8 + i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         s->last_use = s_serial;
     }
-    for (i = 0; i < 14; i++) {
-        memset(&w[i], 0, sizeof w[i]);
-        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w[i].dstBinding = i;
-        w[i].descriptorCount = 1;
-        w[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                            : i < 10 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
-        if (i < 2) w[i].pBufferInfo = &bi[i];
-        else w[i].pImageInfo = &ii[i - 2];
+    {
+        uint32_t nw = 0;
+        for (i = 0; i < 14; i++) {
+            if (s_bound.valid && (i < 2 ? !memcmp(&bi[i], &s_bound.bi[i], sizeof bi[i])
+                                        : !memcmp(&ii[i - 2], &s_bound.ii[i - 2], sizeof ii[0])))
+                continue;                                /* (the command buffer has it) */
+            memset(&w[nw], 0, sizeof w[nw]);
+            w[nw].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[nw].dstBinding = i;
+            w[nw].descriptorCount = 1;
+            w[nw].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                 : i < 10 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
+            if (i < 2) w[nw].pBufferInfo = &bi[i];
+            else w[nw].pImageInfo = &ii[i - 2];
+            nw++;
+        }
+        if (nw)
+            vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, nw, w);
+        memcpy(s_bound.bi, bi, sizeof bi);
+        memcpy(s_bound.ii, ii, sizeof ii);
+        s_bound.valid = 1;
     }
-    vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, 14, w);
     PROF_END(3, PR_DESC);
 
     /* vertex buffers: every slot the layout reads (an unbound one: zeros) */
@@ -540,7 +689,12 @@ static int draw_setup(void)
             bufs[i] = b ? buffer_for_draw(b, &o) : buffer_for_draw(s_dummyvb, &o);
             offs[i] = o + (b ? st.off[i] : 0);
             strides[i] = b ? st.stride[i] : 0;
+            if (s_bound.vb[i] == bufs[i] && s_bound.voff[i] == offs[i] && s_bound.vstride[i] == strides[i])
+                continue;                                /* (bound already) */
             vkCmdBindVertexBuffers2(cb, i, 1, &bufs[i], &offs[i], NULL, &strides[i]);
+            s_bound.vb[i] = bufs[i];
+            s_bound.voff[i] = offs[i];
+            s_bound.vstride[i] = strides[i];
         }
     }
     PROF_END(6, PR_VB);
@@ -560,7 +714,11 @@ static void bind_index(void)
 {
     VkDeviceSize off;
     VkBuffer b = buffer_for_draw(st.ib, &off);
+    if (b == s_bound.ib && off == s_bound.ioff)
+        return;                                          /* (bound already) */
     vkCmdBindIndexBuffer(cmd(), b, off, VK_INDEX_TYPE_UINT32);
+    s_bound.ib = b;
+    s_bound.ioff = off;
 }
 
 void vk_draw_indexed(uint32_t indices, uint32_t first_index, int32_t base_vertex)

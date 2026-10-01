@@ -295,6 +295,7 @@ void vk_swapchain_present(GpuSwapchain *s, int vsync)
         unlock(&s_qlock);
         PROF_END(0, PR_PRESENT);
     }
+    vk_pcache_save(0);                        /* new pipelines to disk, every 10 s at most */
     if (s == s_prof_sc || !s_prof_sc) {
         s_prof_sc = s;
         prof_frame();

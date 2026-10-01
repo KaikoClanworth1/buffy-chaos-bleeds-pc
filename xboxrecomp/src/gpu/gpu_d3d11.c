@@ -7,7 +7,9 @@
  * the hash of source + entry + profile), so existing caches stay valid.
  */
 #define COBJMACROS
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <d3d11_1.h>
 #include <d3dcompiler.h>

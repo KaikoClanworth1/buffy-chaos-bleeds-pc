@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Buffy the Vampire Slayer: Chaos Bleeds, the Android build (a native
+     activity: all of it is C, in libbuffy.so; no Java code). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="io.github.kaikoclanworth1.buffy"
+          android:versionCode="1"
+          android:versionName="0.5.0-dev">
+
+    <uses-sdk android:minSdkVersion="33" android:targetSdkVersion="36" />
+    <!-- the renderer is Vulkan 1.3 -->
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x403000" android:required="true" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="false" />
+
+    <application android:label="Buffy: Chaos Bleeds"
+                 android:hasCode="false"
+                 android:extractNativeLibs="false"
+                 android:appCategory="game"
+                 android:isGame="true">
+        <activity android:name="android.app.NativeActivity"
+                  android:exported="true"
+                  android:screenOrientation="sensorLandscape"
+                  android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+                  android:resizeableActivity="true"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            <meta-data android:name="android.app.lib_name" android:value="buffy" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

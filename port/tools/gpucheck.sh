@@ -11,6 +11,7 @@ bash tools/run.sh "gpucheck_$NAME" 80 BUFFY_SKIP_MOVIES=1 BUFFY_TEST_LEVEL=01000
     'BUFFY_PAD_SCRIPT=4:START,8:START,12:START,15:A,18:START,21:A,24:START' \
     "BUFFY_SHOTS=runs\\gpucheck_$NAME" BUFFY_SHOTS_MS=5000 BUFFY_SHOTS_FROM=40 "$@" >/dev/null 2>&1
 echo "fps: $(grep -a '\[FPS\]' "runs/gpucheck_$NAME.err" | tail -6 | awk '{print $2}' | tr '\n' ' ')"
+echo "game thread Mcycles/frame: $(grep -a '\[FPS\]' "runs/gpucheck_$NAME.err" | tail -6 | awk '{print $5}' | tr '\n' ' ')"
 echo "crashes: $(grep -a -c 'CRASH\|WATCHDOG' "runs/gpucheck_$NAME.err")  shots: $(ls "runs/gpucheck_$NAME" | wc -l)"
 grep -a "\[GPU11\]\|\[GPU\]\|\[VK\]\|\[NATIVE\] .*fail" "runs/gpucheck_$NAME.err" | head -8
 python - "$NAME" <<'EOF'

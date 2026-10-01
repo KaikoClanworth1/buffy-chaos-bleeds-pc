@@ -4,7 +4,9 @@
  * Mark Adler): Windows has tar.exe to unpack archives, Wine / Proton has
  * not, and the updater and the FFmpeg download need zips to work there too. */
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <stdint.h>
 #include <stdlib.h>

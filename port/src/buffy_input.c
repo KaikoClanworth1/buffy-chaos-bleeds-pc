@@ -101,6 +101,16 @@ static uint32_t connected_mask(void)
     return m;
 }
 
+/* VOID XInitDevices(DWORD count, PXDEVICE_PREALLOC_TYPE types) -- 0x0018F7F8
+ * (stdcall). On the console it starts XAPI's USB stack, which drives the
+ * MCPX's USB host controllers directly; here pads, keyboard and mouse are
+ * answered at XGetDevices / XInputOpen / XInputGetState, so there is nothing
+ * to start. */
+void XInitDevices_0018F7F8(void)
+{
+    g_esp += 12;                                         /* ret 8 */
+}
+
 /* DWORD XGetDevices(PXPP_DEVICE_TYPE) -- 0x0018F7FD.
  * Same bookkeeping as XAPI (report current, clear changes, remember it as the
  * previous state); the gamepad type shows the ports that have a pad. */

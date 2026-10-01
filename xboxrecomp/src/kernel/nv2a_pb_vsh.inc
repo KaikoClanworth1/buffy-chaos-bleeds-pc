@@ -188,7 +188,14 @@ static int vsh_generate(const NV2AVshProgram *pr, char *out, int cap)
         "    p.p = float4(o[0].x / (vpp[1].x * 0.5) - 1.0, 1.0 - o[0].y / (vpp[1].y * 0.5), saturate(zn), 1.0);\n"
         "  p.c0 = saturate(o[3]); p.c1 = saturate(o[4]);\n"
         "  p.t0 = o[9]; p.t1 = o[10]; p.t2 = o[11]; p.t3 = o[12];\n"
-        "  p.fog = float4(fogf(o[5].x), 0, 0, 1);\n"
+        /* W-buffering: the depth is linear in W, which the rasteriser does not
+         * interpolate (it interpolates z / w across the screen): a large
+         * triangle's depth sags between its corners and swallows what is just
+         * in front of it -- a wall over its sign's letters, a floor over its
+         * rug, in triangular wedges. So the depth goes along as an attribute
+         * too (perspective-correct, as W is), and the pixel shader writes it:
+         * fog.y the depth, fog.z 1 when it is to be used. */
+        "  p.fog = float4(fogf(o[5].x), saturate(zn), (vpp[0].y > 0.5 && vpp[0].w > vpp[0].z) ? 1.0 : 0.0, 1);\n"
         "  return p;\n}\n");
     return b.n < cap - 1;
 }

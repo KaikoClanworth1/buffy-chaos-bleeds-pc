@@ -45,7 +45,8 @@ typedef void (*recomp_func_t)(void);
 
 /* ── Register state (defined in xbox_memory_layout.c) ──────── */
 
-#include <xbox/xboxrecomp.h>
+#include "kernel.h"
+#include "xbox_memory_layout.h"
 extern RECOMP_TLS uint32_t g_eax, g_esp;
 extern ptrdiff_t g_xbox_mem_offset;
 

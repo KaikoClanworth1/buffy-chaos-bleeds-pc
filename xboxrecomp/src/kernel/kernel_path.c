@@ -325,8 +325,13 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
                                        L"SystemData" };
         WCHAR image[MAX_PATH];
         WCHAR dir[MAX_PATH];
+        /* RECOMP_LAZY_DIRS=1: none of them up front -- a folder is made when
+         * something is created in it (xbox_translate_path), so a title that
+         * never writes to T:/U:/Z: or the hard disk leaves no trace. */
+        if (!(getenv("RECOMP_LAZY_DIRS") && getenv("RECOMP_LAZY_DIRS")[0] == '1'))
         SHCreateDirectoryExW(NULL, s_save_dir, NULL);
-        for (int i = 0; i < (int)(sizeof(subs) / sizeof(subs[0])); i++) {
+        for (int i = 0; i < (int)(sizeof(subs) / sizeof(subs[0]))
+                        && !(getenv("RECOMP_LAZY_DIRS") && getenv("RECOMP_LAZY_DIRS")[0] == '1'); i++) {
             swprintf_s(dir, MAX_PATH, L"%s\\%s", s_save_dir, subs[i]);
             SHCreateDirectoryExW(NULL, dir, NULL);
         }
@@ -401,7 +406,8 @@ void xbox_path_set_hdd_dir(const char *dir)
     s_hdd_dir[0] = 0;
     if (dir && *dir) {
         MultiByteToWideChar(CP_UTF8, 0, dir, -1, s_hdd_dir, MAX_PATH);
-        SHCreateDirectoryExW(NULL, s_hdd_dir, NULL);
+        if (!(getenv("RECOMP_LAZY_DIRS") && getenv("RECOMP_LAZY_DIRS")[0] == '1'))
+            SHCreateDirectoryExW(NULL, s_hdd_dir, NULL);
     }
 }
 
@@ -497,6 +503,8 @@ translate:
             CreateDirectoryW(dir_path, NULL);
         } else {
             swprintf_s(host_path_buf, buf_size, L"%s\\%s", base_dir, remainder_wide);
+            if (base_dir == s_hdd_dir)
+                SHCreateDirectoryExW(NULL, s_hdd_dir, NULL);   /* (RECOMP_LAZY_DIRS: made on use) */
             if (base_dir == s_game_dir && remainder_wide[0]) {
                 int k;
                 for (k = s_overlay_count - 1; k >= 0; k--) {

@@ -29,6 +29,7 @@ endif()
 add_compile_definitions(
     WIN32_LEAN_AND_MEAN
     NOMINMAX
+    _CRT_SECURE_NO_WARNINGS      # (the CRT's "use the _s functions" notes hid the real warnings)
 )
 
 # -- xboxrecomp toolkit ------------------------------------------------------
@@ -36,6 +37,9 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xboxrecomp" CACHE PATH
     "Path to the xboxrecomp toolkit root directory")
 
 # Builds the runtime libraries and provides the 'xboxrecomp' umbrella target.
+# No Xbox GPU is emulated: the game's D3D runs in its no-GPU mode and draws
+# through the native renderer (src/buffy_native.c, src/buffy_gpuwait.c).
+set(XBOXRECOMP_GPU_EMULATION OFF CACHE BOOL "" FORCE)
 add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
 
 # -- Recompiled game executable ----------------------------------------------
@@ -49,6 +53,7 @@ set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
     src/buffy_crt.c
+    src/buffy_d3dx.c
     src/buffy_dsound.c
     src/buffy_input.c
     src/buffy_movie.c
@@ -62,6 +67,7 @@ set(GAME_SOURCES
     src/buffy_import.c
     src/buffy_preload.c
     src/buffy_debug.c
+    src/buffy_profile.c
     src/buffy_platform.c
     src/buffy_saves.c
     src/buffy_savefmt.c
@@ -86,7 +92,7 @@ endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11 dxgi dxguid xinput winmm dbghelp
-    xboxrecomp
+    xbox_kernel
 )
 
 # -- Launcher ("Buffy Launcher.exe"): install from the disc image, settings, mods

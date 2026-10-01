@@ -40,8 +40,8 @@ The game itself is buffy_chaos_bleeds.exe; keep the installed folder together
 one file in SaveData\ (BUFFY A.sav and so on): copy them to back them up or to
 move them to another PC. Saves from versions before 0.4 (the Xbox layout in
 UDATA\) are converted the first time the game or the launcher's Saves tab
-runs; the originals are kept in SaveBackups\. XboxData\ holds the emulated
-console's own files and can be left alone.
+runs; the originals are kept in SaveBackups\. Nothing else is written (an
+XboxData\ folder from before 0.5 is no longer used and can be deleted).
 
 Controls (keyboard, while the game window is focused):
   Enter = Start      Space = A        Backspace = B      E = X     Q = Y
@@ -54,10 +54,8 @@ Black/White buttons.
 
 Renderer: the native renderer draws the game's own Direct3D calls, through
 Vulkan (the default; Direct3D 11 where Vulkan 1.3 is missing) or Direct3D 11
-(Renderer=d3d11). The emulated renderer (it emulates the Xbox GPU
-from its command stream) is still there as a fallback: set Renderer to
-"Emulated" in the launcher's Settings, or [Display] Renderer=emulated in
-buffy_settings.ini, or BUFFY_RENDERER=emulated.
+(Renderer=d3d11). No Xbox GPU is emulated: the emulated renderer is gone
+in 0.5, and a Renderer=emulated setting starts Vulkan.
 
 Current state: boots to the title screen and main menu with graphics (Direct3D
 11) and sound (Windows DirectSound). Movies play with sound from the
@@ -69,7 +67,7 @@ New Game works: the first level (Magic Box) loads and is playable, with
 cutscenes, combat and saving, at a steady 60 fps.
 PC options (in the game's own menus):
   Options page:  PC Settings - opens a page with the PC options below, plus
-                               Fullscreen, FPS Limit (60 or 30), Show FPS
+                               Fullscreen, FPS Limit (30 to 360), Show FPS
                                (a counter) and Debug Overlay (frame rate,
                                frame times, renderer, resolution, GPU).
                  Resolution  - Left/Right picks the size the game is drawn

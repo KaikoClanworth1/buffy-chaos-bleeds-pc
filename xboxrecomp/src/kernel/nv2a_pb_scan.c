@@ -154,7 +154,7 @@ void nv2a_pb_scan(uint32_t start_va, uint32_t end_va)
     uint32_t words = 0, jumps = 0, unknown = 0;
 
     if (s_exec_enabled < 0)
-        s_exec_enabled = getenv("RECOMP_PB_EXEC") != NULL;
+        s_exec_enabled = getenv("RECOMP_PB_EXEC") && getenv("RECOMP_PB_EXEC")[0] != '0';
     if (!(getenv("RECOMP_PB_SCAN") || s_exec_enabled) || end_va <= start_va)
         return;
     if (end_va - start_va > 0x400000u)        /* a sane single-frame bound */
@@ -510,15 +510,17 @@ static DWORD WINAPI pb_fifo_thread(LPVOID param)
 
 /* Start the puller if RECOMP_PB_EXEC asks for execution. Returns 1 when it
  * owns DMA_GET, in which case the service thread must not touch it. */
+HANDLE g_pb_fifo_thread;
+
 int nv2a_pb_fifo_start(void *nv2a_regs)
 {
     HANDLE h;
-    if (!getenv("RECOMP_PB_EXEC") || !nv2a_regs)
+    if (!getenv("RECOMP_PB_EXEC") || getenv("RECOMP_PB_EXEC")[0] == '0' || !nv2a_regs)
         return 0;
     h = CreateThread(NULL, 0, pb_fifo_thread, nv2a_regs, 0, NULL);
     if (!h)
         return 0;
-    CloseHandle(h);
+    g_pb_fifo_thread = h;                        /* (kept: xbox_gpu_set_native raises it) */
     fprintf(stderr, "  NV2A FIFO puller: executing the pushbuffer on its own thread\n");
     return 1;
 }

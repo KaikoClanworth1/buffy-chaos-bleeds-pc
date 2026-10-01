@@ -21,6 +21,7 @@
 #if !defined(_WIN32)
 #include <unistd.h>   /* _exit */
 #else
+#include <timeapi.h>  /* timeBeginPeriod */
 #include <dbghelp.h>  /* watchdog: host RIP -> generated function name */
 #include <tlhelp32.h> /* watchdog: sample every thread */
 #if defined(_MSC_VER)
@@ -806,8 +807,20 @@ static void gpu_idle_init(void)
 
 void xbox_gpu_set_native(int on)
 {
+    extern HANDLE g_pb_fifo_thread;
     /* RECOMP_PB_FULL=1: walk and execute everything as before (A/B tests) */
     g_gpu_native = on != 0 && !getenv("RECOMP_PB_FULL");
+    /* Native: the pushbuffer threads only answer the title's handshakes and
+     * sleep otherwise, but the game thread spins in KickOff until they have
+     * -- on a busy PC (a video encode on every core) waiting for Windows to
+     * run them cost the game thread a quarter of its time. Above normal, they
+     * run as soon as they are woken. */
+    if (g_gpu_native) {
+        if (g_pb_fifo_thread)
+            SetThreadPriority(g_pb_fifo_thread, THREAD_PRIORITY_ABOVE_NORMAL);
+        if (g_nv2a_ack_thread)
+            SetThreadPriority(g_nv2a_ack_thread, THREAD_PRIORITY_ABOVE_NORMAL);
+    }
 }
 
 /* GPU work just happened: stay responsive for the next 2 ms. */
@@ -1103,20 +1116,46 @@ void xbox_Nv2aPcrtcIntrSet(uint32_t value)
 
 static void xbox_Nv2aAckStart(void)
 {
+    extern int nv2a_pb_fifo_start(void *nv2a_regs);
+    const char *ack = getenv("RECOMP_NV2A_ACK"), *exec = getenv("RECOMP_PB_EXEC");
+    size_t i;
+
+    /* RECOMP_NV2A_ACK=0 with RECOMP_PB_EXEC=0 (unset): no GPU is emulated.
+     * For a title whose D3D runs without one (D3D__NullHardware), which
+     * never waits on it: no register thread, no pushbuffer thread, no
+     * write-1-to-clear trap. The registers say once what stays true with
+     * no GPU work ever queued -- nothing busy, nothing pending, queues empty
+     * (D3D's tile setup at init waits on exactly these). */
+#ifndef XBOXRECOMP_NO_GPU_EMULATION
+    if (ack && ack[0] == '0' && !(exec && exec[0] != '0'))
+#else
+    (void)ack; (void)exec;                /* built without GPU emulation */
+#endif
+    {
+        if (g_nv2a_memory) {
+            for (i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++)
+                *(volatile uint32_t *)((char *)g_nv2a_memory + NV2A_ACK[i].offset) &= ~NV2A_ACK[i].busy_mask;
+            for (i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++)
+                *(volatile uint32_t *)((char *)g_nv2a_memory + NV2A_IDLE[i].offset) |= NV2A_IDLE[i].idle_mask;
+        }
+        fprintf(stderr, "  NV2A: no GPU emulated (registers idle)\n");
+        return;
+    }
+#ifndef XBOXRECOMP_NO_GPU_EMULATION
     if (g_nv2a_memory) {
         AddVectoredExceptionHandler(1, nv2a_w1c_veh);
         nv2a_pgraph_protect(PAGE_READONLY);
         nv2a_w1c_protect(1, PAGE_READONLY);
     }
-    extern int nv2a_pb_fifo_start(void *nv2a_regs);
     g_nv2a_ack_stop = 0;
     g_pb_fifo_owned = nv2a_pb_fifo_start(g_nv2a_memory);
-    g_nv2a_ack_thread = CreateThread(NULL, 0, nv2a_ack_thread,
-                                     g_nv2a_memory, 0, NULL);
+    g_nv2a_ack_thread = ack && ack[0] == '0' ? NULL
+        : CreateThread(NULL, 0, nv2a_ack_thread, g_nv2a_memory, 0, NULL);
     if (g_nv2a_ack_thread) {
         fprintf(stderr, "  NV2A busy-bit ack: %zu register(s) acknowledged\n",
                 sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]));
     }
+#endif
 }
 
 /* Separate allocation for Xbox kernel address space (0x80010000+).
@@ -1488,6 +1527,40 @@ static void watchdog_report(FILE *out, const char *why)
                         (unsigned long long)c.Rip);
             Sleep(37);
         }
+        /* And the game thread's whole host call stack: a wait inside the
+         * runtime or a driver (a Sleep, a present) names only its innermost
+         * frame above. */
+        {
+            CONTEXT c;
+            STACKFRAME64 sf;
+            int depth;
+            memset(&c, 0, sizeof c);
+            c.ContextFlags = CONTEXT_FULL;
+            if (SuspendThread(s_watchdog_thread) != (DWORD)-1) {
+                if (GetThreadContext(s_watchdog_thread, &c)) {
+                    memset(&sf, 0, sizeof sf);
+                    sf.AddrPC.Offset = c.Rip;    sf.AddrPC.Mode = AddrModeFlat;
+                    sf.AddrFrame.Offset = c.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
+                    sf.AddrStack.Offset = c.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+                    for (depth = 0; depth < 24; depth++) {
+                        char sbuf[sizeof(SYMBOL_INFO) + 256];
+                        SYMBOL_INFO *sym = (SYMBOL_INFO *)sbuf;
+                        DWORD64 disp = 0;
+                        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(), s_watchdog_thread, &sf, &c,
+                                         NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL) || !sf.AddrPC.Offset)
+                            break;
+                        memset(sbuf, 0, sizeof sbuf);
+                        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+                        sym->MaxNameLen = 255;
+                        if (SymFromAddr(GetCurrentProcess(), sf.AddrPC.Offset, &disp, sym))
+                            fprintf(out, "  host stack %2d: %s+0x%llX\n", depth, sym->Name, (unsigned long long)disp);
+                        else
+                            fprintf(out, "  host stack %2d: 0x%llX\n", depth, (unsigned long long)sf.AddrPC.Offset);
+                    }
+                }
+                ResumeThread(s_watchdog_thread);
+            }
+        }
     }
 
     /* RECOMP_DUMP_RANGE=0xVA:0xLEN:path -- raw guest memory at the hang, for
@@ -1495,7 +1568,7 @@ static void watchdog_report(FILE *out, const char *why)
     {
         const char *spec = getenv("RECOMP_DUMP_RANGE");
         if (spec) {
-            char *e1, *e2;
+            char *e1, *e2 = NULL;
             unsigned long va = strtoul(spec, &e1, 0);
             unsigned long len = (*e1 == ':') ? strtoul(e1 + 1, &e2, 0) : 0;
             if (len && *e2 == ':') {
@@ -1800,11 +1873,36 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * tried the fixed addresses and gave up. Invisible on Windows, where
          * one of the low bases succeeds -- fatal on arm64 macOS, where all of
          * them sit inside the 4 GB __PAGEZERO segment and none can. */
+        /* The guest's whole 4 GB address space in one place the system has
+         * free: ask for 4 GB of address space wherever there is room, hand it
+         * back, and map the base view at its start -- every later window
+         * (contiguous memory at 0x80000000, the GPU registers at 0xFD000000,
+         * the mirrors) then lands in address space known to be empty, instead
+         * of wherever base + a fixed Xbox address happens to fall. The old
+         * way, the base chosen first and the rest placed after, collided
+         * under Wine / Proton: its own mappings sat where the contiguous
+         * window had to go (error 487) and the game crashed at start.
+         * RECOMP_OLD_LAYOUT=1: the old placement. */
+        if (!getenv("RECOMP_OLD_LAYOUT")) {
+            int tries;
+            for (tries = 0; tries < 8 && !g_memory_base; tries++) {
+                void *block = VirtualAlloc(NULL, (size_t)1 << 32, MEM_RESERVE, PAGE_NOACCESS);
+                if (!block)
+                    break;
+                VirtualFree(block, 0, MEM_RELEASE);
+                g_memory_base = MapViewOfFileEx(g_mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0,
+                                                g_memory_size, (char *)block + XBOX_MAP_START);
+            }
+            if (g_memory_base)
+                fprintf(stderr, "xbox_MemoryLayoutInit: the guest's 4 GB at %p (one block, placed by the system)\n",
+                        g_memory_base);
+        }
+
         /* Reserve base + mirrors as one range, and map the base at its head.
          * VirtualFree releases just the slice about to be used, so each view
          * replaces our own reservation rather than racing for free space. */
-        g_span_size = g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
-        g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
+        g_span_size = g_memory_base ? 0 : g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
+        g_span_base = g_span_size ? VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS) : NULL;
         if (g_span_base) {
             VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);
             g_memory_base = MapViewOfFileEx(g_mapping_handle,
@@ -2370,7 +2468,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      * waiting for a bit to set, extend the NV2A ack thread's table rather than
      * emulating the device.
      */
-    {
+    /* RECOMP_NO_MCPX=1: no MCPX aperture -- for a title whose audio, USB
+     * and network are all answered above the hardware (nothing reads it). */
+    if (getenv("RECOMP_NO_MCPX") && getenv("RECOMP_NO_MCPX")[0] == '1')
+        fprintf(stderr, "  MCPX device aperture: off (RECOMP_NO_MCPX)\n");
+    else {
         uintptr_t mcpx_native = XBOX_MCPX_BASE + g_memory_offset;
         g_mcpx_memory = VirtualAlloc(
             (LPVOID)mcpx_native,
@@ -2448,8 +2550,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         }
     }
 
-    /* Flash ROM aperture -- see XBOX_FLASH_BASE for why. */
-    {
+    /* Flash ROM aperture -- see XBOX_FLASH_BASE for why.
+     * RECOMP_NO_FLASH=1: none (a title that never reads the BIOS). */
+    if (getenv("RECOMP_NO_FLASH") && getenv("RECOMP_NO_FLASH")[0] == '1')
+        fprintf(stderr, "  Flash ROM aperture: off (RECOMP_NO_FLASH)\n");
+    else {
         uintptr_t flash_native = XBOX_FLASH_BASE + g_memory_offset;
 
         g_flash_memory = VirtualAlloc(
@@ -2543,8 +2648,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * (m + 1) * g_memory_size. */
         uint64_t tiled_lo = XBOX_TILED_BASE;
         uint64_t tiled_hi = tiled_lo + xbox_TiledApertureSize();
+        /* RECOMP_NO_MIRRORS=1: none -- RAM is at its own addresses only, as
+         * on a PC; a title that reaches RAM through the wrap faults there
+         * (and the crash names the code). */
+        int n_mirrors = getenv("RECOMP_NO_MIRRORS") && getenv("RECOMP_NO_MIRRORS")[0] == '1' ? 0 : XBOX_NUM_MIRRORS;
 
-        for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
+        for (int m = 0; m < n_mirrors; m++) {
             uintptr_t mirror_base = (uintptr_t)g_memory_base +
                                     (uintptr_t)(m + 1) * g_memory_size;
             uint64_t guest_lo = (uint64_t)(m + 1) * g_memory_size;
@@ -2576,7 +2685,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             }
         }
         fprintf(stderr, "  RAM mirror: %d/%d views mapped (covers %d MB)\n",
-                mirrors_ok, XBOX_NUM_MIRRORS,
+                mirrors_ok, n_mirrors,
                 (int)((mirrors_ok + 1) * g_memory_size / (1024 * 1024)));
     }
 
@@ -2617,7 +2726,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          */
         if (tiled_size > XBOX_CONTIG_SIZE)
             tiled_size = XBOX_CONTIG_SIZE;
-        g_tiled_view = g_contig_mapping
+        /* RECOMP_NO_TILED=1: no tiled aperture (a title whose GPU is not
+         * emulated -- a native renderer -- may never write through it). */
+        g_tiled_view = g_contig_mapping && !(getenv("RECOMP_NO_TILED") && getenv("RECOMP_NO_TILED")[0] == '1')
             ? MapViewOfFileEx(
                 g_contig_mapping,
                 FILE_MAP_ALL_ACCESS,
@@ -2657,6 +2768,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                     " (aliases the contiguous window)\n",
                     (unsigned)(g_memory_size / (1024 * 1024)),
                     XBOX_TILED_BASE);
+        } else if (getenv("RECOMP_NO_TILED") && getenv("RECOMP_NO_TILED")[0] == '1') {
+            fprintf(stderr, "  Tiled aperture: off (RECOMP_NO_TILED)\n");
         } else {
             fprintf(stderr, "  WARNING: tiled aperture at 0x%08X failed"
                     " (error %lu); rendering writes will fault\n",

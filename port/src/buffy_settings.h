@@ -17,7 +17,7 @@ const char *buffy_settings_path(void);
 int  buffy_settings_frame_interpolation(void);   /* a frame in between each two */
 int  buffy_settings_widescreen_wide(void);     /* 0: widescreen keeps the 4:3 side-to-side view */
 int  buffy_settings_invert_camera_x(void);         /* buffy_settings.ini */
-int  buffy_settings_fps_limit(void);         /* 60 or 30: the frame cap (the game's logic is one step a frame) */
+int  buffy_settings_fps_limit(void);         /* 30 to 360: the frame cap (the game keeps its speed: buffy_frame.c) */
 int  buffy_settings_show_fps(void);          /* the FPS counter */
 int  buffy_settings_overlay(void);           /* the debug overlay */
 void buffy_settings_set_fps_limit(int fps);

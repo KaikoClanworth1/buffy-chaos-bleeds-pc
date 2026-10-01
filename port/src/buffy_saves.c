@@ -251,6 +251,36 @@ void XFindClose_00129897(void)
     ret_stdcall(1, 4);
 }
 
+/* void XapipUpdateRebootIfNecessary(void) -- 0x0012B6C6, from XAPI's start-up:
+ * looks on T: for an Xbox Live title update (T:\$u) and reboots into it.
+ * There are none to find here. */
+void XapipUpdateRebootIfNecessary_0012B6C6(void)
+{
+    g_esp += 4;                                          /* ret */
+}
+
+/* NTSTATUS XapiValidateDiskPartition(POBJECT_STRING partition) -- 0x0012AC2D
+ * (stdcall), from XAPI's start-up: opens the hard disk's partition and checks
+ * its file system, sending the console to the dashboard if it is not a
+ * valid FATX volume. There is no Xbox hard disk here (nothing is written to
+ * it: see below), so there is nothing to check. */
+void XapiValidateDiskPartition_0012AC2D(void)
+{
+    ret_stdcall(0, 4);                                   /* STATUS_SUCCESS */
+}
+
+/* NTSTATUS XapiSetupPerTitleDriveLetters(DWORD title_id, LPCWSTR name) --
+ * 0x0012A8F3 (stdcall), from XAPI's start-up. On the console it links T: and
+ * U: to the hard disk's TDATA\<id> and UDATA\<id>, creating them the first
+ * time with the dashboard's copies of the title's icon and name
+ * (TitleImage.xbx, SaveImage.xbx, TitleMeta.xbx). Here U: is the SaveData
+ * folder (the path layer's user mapper, above) and nothing uses T:, so there
+ * is nothing to link or create. */
+void XapiSetupPerTitleDriveLetters_0012A8F3(void)
+{
+    ret_stdcall(0, 8);                                   /* STATUS_SUCCESS */
+}
+
 /* BOOL XMountUtilityDrive(BOOL fFormatClean) -- 0x00128E01, from XAPI's
  * start-up. On the console it picks one of the hard disk's three cache
  * partitions, checks (or formats) its file system and links Z: to it; here Z:

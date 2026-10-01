@@ -15,6 +15,7 @@
  * BUFFY_UNCAPPED=1 turns it off.
  */
 #include <windows.h>
+#include <timeapi.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -41,6 +42,10 @@ static void pace_60hz(void)
         timeBeginPeriod(1);
     }
     {
+        void buffy_profile_frame(void);
+        buffy_profile_frame();                         /* (testing) BUFFY_PROFILE: buffy_profile.c */
+    }
+    {
         /* (testing) BUFFY_FPS_LOG=1: frames per second, every 5 s */
         static int log = -1;
         static LARGE_INTEGER t0;
@@ -54,7 +59,15 @@ static void pace_60hz(void)
                 t0 = t;
             frames++;
             if (t.QuadPart - t0.QuadPart >= freq.QuadPart * 5) {
-                fprintf(stderr, "[FPS] %.1f\n", frames * (double)freq.QuadPart / (double)(t.QuadPart - t0.QuadPart));
+                /* and the game thread's own work: CPU cycles a frame (other
+                 * programs' load does not change it; the pacing wait is not in it) */
+                static ULONG64 c0;
+                ULONG64 c = 0;
+                QueryThreadCycleTime(GetCurrentThread(), &c);
+                fprintf(stderr, "[FPS] %.1f  (game thread %.2f Mcycles/frame)\n",
+                        frames * (double)freq.QuadPart / (double)(t.QuadPart - t0.QuadPart),
+                        c0 && frames ? (double)(c - c0) / frames / 1e6 : 0.0);
+                c0 = c;
                 frames = 0;
                 t0 = t;
             }
@@ -64,7 +77,7 @@ static void pace_60hz(void)
         return;
     {
         int buffy_settings_fps_limit(void);
-        period = freq.QuadPart / (buffy_settings_fps_limit() == 30 ? 30 : 60);
+        period = freq.QuadPart / buffy_settings_fps_limit();
     }
     QueryPerformanceCounter(&now);
     if (!next.QuadPart || now.QuadPart >= next.QuadPart) {
@@ -85,6 +98,133 @@ static void pace_60hz(void)
             SwitchToThread();
     }
     next.QuadPart += period;
+}
+
+/* The engine's frame rate (EngineX's EXBaseApp statics).
+ *
+ * Each frame EXApp::MainUpdate picks a rate -- m_MaxFrameRate, or less when
+ * the frame's CPU work (its own benchmark timer, measured against a
+ * 1/m_MaxFrameRate frame) would not fit, but not below m_MinFrameRate -- and
+ * UpdateFrameRate sets m_FrameLength = 1 / rate and the multipliers the game
+ * and the engine scale every per-frame step by: nominal (60) / rate. It is
+ * how the PAL (50 Hz) build ran at the right speed. The console's maximum
+ * was 60; here it is the frame rate the game actually runs at: the FPS
+ * limit, or less when frames take longer (vsync on a slower display, the
+ * GPU) -- which the engine cannot see, as its timer only measures its own
+ * work. So 120 frames a second are 120 half steps, and the game keeps its
+ * own speed at any rate (at a 30 limit it no longer runs at half speed).
+ * BUFFY_FRAME_RATE_LOG=1 prints the rate each second (testing). */
+#define EXBASEAPP_MAX_FRAME_RATE   0x1B98ACu    /* m_MaxFrameRate (60) */
+#define EXBASEAPP_MIN_FRAME_RATE   0x1B98A8u    /* m_MinFrameRate (30) */
+
+/* What still counts frames rather than time: the game's frame count
+ * (EXBaseStats, read for "every 10 / 20 frames" work -- plant growth, combat
+ * music, thrown characters) and the monsters' per-frame counters
+ * (TickCounters: attack and stun timers in frames, a boss's 300-frame
+ * phases). Both stay on a 60 Hz beat: each frame owes 60 / rate ticks, and
+ * they run once per whole tick -- every other frame at 120, as at 60 every
+ * frame. At 30 the counters run twice a frame; the frame count still moves
+ * once, so the "every N frames" work divides it as the console's did. */
+static double s_tick_acc;
+static int s_ticks60 = 1;
+
+void buffy_frame_rate_apply(void)
+{
+    int buffy_settings_fps_limit(void);
+    static LARGE_INTEGER freq, last;
+    static double avg_ms;                          /* recent frame time (wall clock) */
+    LARGE_INTEGER now;
+    int limit = buffy_settings_fps_limit(), fps;
+    uint32_t min = MEM32(EXBASEAPP_MIN_FRAME_RATE);
+
+    if (getenv("BUFFY_UNCAPPED") && getenv("BUFFY_UNCAPPED")[0] == '1')
+        limit = 360;                               /* (testing) no pacing: the measured rate */
+    fps = limit;
+    if (!freq.QuadPart)
+        QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    if (last.QuadPart) {
+        double ms = (double)(now.QuadPart - last.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        if (ms > 1000.0 / 20)
+            ms = 1000.0 / 20;                      /* a load stall: not a frame rate */
+        avg_ms = avg_ms ? avg_ms + (ms - avg_ms) * 0.125 : ms;
+        /* below the limit by more than 5%: the rate frames really come at */
+        if (avg_ms > 1000.0 / limit * 1.05)
+            fps = (int)(1000.0 / avg_ms + 0.5);
+    }
+    last = now;
+    if (min && (uint32_t)fps < min)
+        fps = (int)min;
+    MEM32(EXBASEAPP_MAX_FRAME_RATE) = (uint32_t)fps;
+    /* 60 Hz ticks owed by this frame (below) */
+    s_tick_acc += 60.0 / fps;
+    s_ticks60 = (int)s_tick_acc;
+    s_tick_acc -= s_ticks60;
+    if (s_ticks60 > 2) {
+        s_ticks60 = 2;
+        s_tick_acc = 0;
+    }
+    if (getenv("BUFFY_FRAME_RATE_LOG")) {
+        static DWORD t;
+        if (GetTickCount() - t >= 1000) {
+            t = GetTickCount();
+            fprintf(stderr, "[RATE] limit %d, engine %d (frame %.2f ms, step x%.3f)\n", limit, fps, avg_ms,
+                    MEMF(0x1B98C0));
+        }
+    }
+}
+
+/* void EXBaseStats::FrameUpdate(int) -- 0x000D5C50 (thiscall, ret 4): the
+ * frame count, once per 60 Hz tick. */
+void EXBaseStats_FrameUpdate_000D5C50_orig(void);
+void EXBaseStats_FrameUpdate_000D5C50(void)
+{
+    if (s_ticks60 <= 0) {
+        g_esp += 8;                                     /* ret 4 */
+        return;
+    }
+    EXBaseStats_FrameUpdate_000D5C50_orig();
+}
+
+/* void XItemHandler_Monster::TickCounters() -- 0x000638E0, and Kakistos's
+ * override 0x0001A6E0 (which calls it first): thiscall, ret. Run once per
+ * 60 Hz tick this frame owes (0, 1 or 2 times). */
+static int s_in_tick;
+
+static void tick_counters(void (*orig)(void))
+{
+    uint32_t self = g_ecx, ret = MEM32(g_esp);
+    int i;
+    if (s_in_tick) {                                    /* Kakistos -> Monster: already counted */
+        orig();
+        return;
+    }
+    if (s_ticks60 <= 0) {
+        g_esp += 4;                                     /* ret */
+        return;
+    }
+    s_in_tick = 1;
+    for (i = 0; i < s_ticks60; i++) {
+        if (i) {
+            g_esp -= 4;
+            MEM32(g_esp) = ret;                         /* the return address again */
+        }
+        g_ecx = self;
+        orig();
+    }
+    s_in_tick = 0;
+}
+
+void XItemHandler_Monster_TickCounters_000638E0_orig(void);
+void XItemHandler_Monster_TickCounters_000638E0(void)
+{
+    tick_counters(XItemHandler_Monster_TickCounters_000638E0_orig);
+}
+
+void XItemHandler_Boss_Kakistos_TickCounters_0001A6E0_orig(void);
+void XItemHandler_Boss_Kakistos_TickCounters_0001A6E0(void)
+{
+    tick_counters(XItemHandler_Boss_Kakistos_TickCounters_0001A6E0_orig);
 }
 
 /* void D3DDevice_Swap(DWORD flags) -- 0x0013A070, wrapped. */

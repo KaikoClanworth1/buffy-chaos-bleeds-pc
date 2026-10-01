@@ -4,20 +4,20 @@
  * The game draws through the Xbox D3D8 library (translated with the rest of
  * the code). The native renderer hooks its draw calls and reads the library's
  * own state at each draw -- render states, texture stages, bound textures,
- * vertex streams, vertex shader -- to draw with D3D11 directly, instead of
- * decoding the NV2A pushbuffer the library writes (the emulated renderer,
- * nv2a_pb_d3d11.inc, which stays as the fallback and the reference).
+ * vertex streams, vertex shader -- to draw with the PC's GPU directly. No
+ * Xbox GPU is emulated: the library runs in its own no-GPU mode, and the
+ * NV2A pushbuffer it still writes is retired unread (main.c,
+ * buffy_gpuwait.c).
  *
  * This phase captures that state and reports it (BUFFY_NATIVE_LOG): a
  * per-frame summary, and every draw of one frame in full, to check the
  * capture against what the emulated renderer draws. Drawing comes next.
  *
- * Renderer choice: [Display] Renderer = vulkan (the default) | d3d11 |
- * emulated in buffy_settings.ini, or BUFFY_RENDERER. vulkan and d3d11 are
- * the native renderer through the GPU layer's two backends (vulkan falls
- * back to Direct3D 11 without Vulkan 1.3; BUFFY_GPU_BACKEND overrides).
- * "native" (0.3 and before: the default) is the default now: vulkan. The emulated renderer stays as the
- * fallback (and when no Direct3D 11 device comes up) and for A/B comparison.
+ * Renderer choice: [Display] Renderer = vulkan (the default) | d3d11 in
+ * buffy_settings.ini, or BUFFY_RENDERER: the GPU layer's two backends
+ * (vulkan falls back to Direct3D 11 without Vulkan 1.3; BUFFY_GPU_BACKEND
+ * overrides). Older settings' "native" and "emulated" (the emulated Xbox GPU,
+ * removed in 0.5) mean vulkan.
  */
 #include <windows.h>
 #include <stdio.h>
@@ -34,19 +34,21 @@ void nv2a_gpu_native_scale(float *sx, float *sy);
 void nv2a_gpu_native_present(GpuTexture *tex, uint32_t w, uint32_t h, uint32_t pw, uint32_t ph);
 
 /* getenv, remembered: debug switches are checked on every draw, and the
- * CRT's getenv walks the whole environment each time. */
+ * CRT's getenv walks the whole environment each time. Keyed by the name's
+ * address (every caller passes a string literal): one pointer compare a
+ * lookup -- a list searched with strcmp cost 6% of the game thread. */
 static const char *nenv(const char *name)
 {
-    static struct { const char *name; const char *value; } cache[48];
-    static int n;
-    int i;
-    for (i = 0; i < n; i++)
-        if (cache[i].name == name || !strcmp(cache[i].name, name))
-            return cache[i].value;
-    if (n < 48) {
-        cache[n].name = name;
-        cache[n].value = getenv(name);
-        return cache[n++].value;
+    static struct { const char *name; const char *value; } tab[256];
+    unsigned h = (unsigned)(((uintptr_t)name >> 3) * 2654435761u) >> 24, i;
+    for (i = 0; i < 256; i++, h = (h + 1) & 255) {
+        if (tab[h].name == name)
+            return tab[h].value;
+        if (!tab[h].name) {
+            tab[h].value = getenv(name);
+            tab[h].name = name;
+            return tab[h].value;
+        }
     }
     return getenv(name);
 }
@@ -114,11 +116,32 @@ static int fb_ready(void)
 #define D3D_SIMPLE_COUNT   92
 #define DEV_TEXTURES       0xB68u           /* device: bound texture per stage */
 #define DEV_VSHADER        0x37Cu           /* device: current vertex shader */
+#define D3D_RS_ZENABLE     0x14547Cu        /* D3D__RenderState[D3DRS_ZENABLE] */
+
+/* The W-buffer's depth range: what D3D's CommonSetViewport computes for
+ * W mode and hands the GPU as NV097_SET_CLIP_MIN/MAX (0x0394, 0x0398) --
+ * written only into the pushbuffer, so read back from what it just wrote.
+ * Kept from the last time W mode was on (Swap sets a Z range for its own
+ * copy in between). 0, 0 until then. */
+static float s_wclip[2];
+
+void D3D_CommonSetViewport_001368E0_orig(void);
+void D3D_CommonSetViewport_001368E0(void)
+{
+    D3D_CommonSetViewport_001368E0_orig();         /* returns the pushbuffer position after its writes */
+    if (MEM32(D3D_RS_ZENABLE) == 2 && g_eax >= 12 && MEM32(g_eax - 12) == 0x80394u) {
+        float mn = MEMF(g_eax - 8), mx = MEMF(g_eax - 4);
+        if (mn > 0.0f && mx > mn) {
+            s_wclip[0] = mn;
+            s_wclip[1] = mx;
+        }
+    }
+}
 
 enum { PATH_INDEXED, PATH_UP, PATH_BEGIN, PATH_PUSH, PATH_CLEAR, PATH_RT, PATH_COUNT };
 static const char *k_path_name[PATH_COUNT] = { "indexed", "up", "begin/end", "push", "clear", "rendertarget" };
 
-static int s_mode = -1;                     /* 0 emulated, 1 native */
+static int s_mode = -1;                     /* 1 once the device is up */
 static int s_log = -1;
 static long s_frame;
 static unsigned s_count[PATH_COUNT], s_prims;
@@ -134,22 +157,25 @@ int buffy_native_mode(void)
             strncpy_s(v, sizeof v, e, _TRUNCATE);
         else if (ini && *ini)
             GetPrivateProfileStringA("Display", "Renderer", "vulkan", v, sizeof v, ini);
-        s_mode = _stricmp(v, "emulated") != 0;   /* native unless asked otherwise */
-        if (s_mode && !getenv("BUFFY_GPU_BACKEND"))
+        if (!getenv("BUFFY_GPU_BACKEND"))
             _putenv_s("BUFFY_GPU_BACKEND", !_stricmp(v, "d3d11") ? "d3d11" : "vulkan");
-        if (s_mode) {
-            /* the device comes up here, on this (the game's) thread, which
-             * owns its context from now on; the emulated renderer only keeps
-             * the D3D library's bookkeeping */
-            if (!(s_gpu_up = nv2a_gpu_native_begin())) {
-                fprintf(stderr, "[NATIVE] no GPU device: using the emulated renderer\n");
-                s_mode = 0;
-            } else {
-                void nv2a_native_const_pool(void);
-                nv2a_native_const_pool();
-                fprintf(stderr, "[NATIVE] native renderer\n");
-            }
+        /* the device comes up here, on this (the game's) thread, which owns
+         * its context from now on */
+        if (!(s_gpu_up = nv2a_gpu_native_begin())) {
+            fprintf(stderr, "[NATIVE] no GPU device (Vulkan 1.3 or Direct3D 11)\n");
+            if (!getenv("BUFFY_NO_WINDOW"))
+                MessageBoxA(NULL, "No graphics device came up.\n\n"
+                            "Buffy needs a GPU with Vulkan 1.3 or Direct3D 11. "
+                            "Updating the graphics driver usually fixes this.",
+                            "Buffy the Vampire Slayer: Chaos Bleeds", MB_ICONERROR);
+            ExitProcess(1);
         }
+        {
+            void nv2a_native_const_pool(void);
+            nv2a_native_const_pool();
+            fprintf(stderr, "[NATIVE] native renderer\n");
+        }
+        s_mode = 1;
     }
     return s_mode;
 }
@@ -285,6 +311,7 @@ typedef struct {
     NativeTex tex[4];
     int pixel_shader;
     const uint32_t *rs, *tss;
+    float clip_min, clip_max;          /* the depth range D3D clips to (nv2a_native.inc) */
 } NativeDraw;
 int  nv2a_native_draw(const NativeDraw *d, GpuTexture *rt, GpuTexture *ds,
                       uint32_t pw, uint32_t ph, uint32_t sw, uint32_t sh);
@@ -504,6 +531,9 @@ static void native_draw(uint32_t prim, uint32_t count, uint32_t index_va, uint32
         }
     }
     d.vp_start = MEM32(dev + DEV_VP_START);
+    /* the depth range W-buffering maps W through (CommonSetViewport, below) */
+    d.clip_min = s_wclip[0];
+    d.clip_max = s_wclip[1];
     native_attrs(&d, dev, up_data, up_stride);
     if (up_data && up_stride == 16 && count == 4 && nenv("BUFFY_NATIVE_RECTLOG")) {
         /* debug: full-screen solid rects (EXWnd::_SolidRect2D) drawn with some alpha, and who asked */
@@ -667,11 +697,28 @@ void D3DDevice_BeginPush_001354E0_orig(void);
 void D3DDevice_Clear_0013A350_orig(void);
 void D3DDevice_SetRenderTarget_001387A0_orig(void);
 
+/* The draws are the native renderer's alone: the library's own versions
+ * only turned them into NV2A commands for a GPU that is not there (its lazy
+ * state flush, the indices or vertices copied into the pushbuffer, a fence)
+ * -- the renderer reads the state the setters keep, not those commands.
+ * (testing) BUFFY_D3D_DRAWS=1 runs the library's as well. */
+static int d3d_draws(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = nenv("BUFFY_D3D_DRAWS") != NULL;
+    return on;
+}
+
 /* void DrawIndexedVertices(D3DPRIMITIVETYPE, UINT VertexCount, CONST PVOID pIndexData) */
 void D3DDevice_DrawIndexedVertices_0013A940(void)
 {
     capture(PATH_INDEXED, MEM32(g_esp + 4), MEM32(g_esp + 8), MEM32(g_esp + 12), 0);
     native_draw(MEM32(g_esp + 4), MEM32(g_esp + 8), MEM32(g_esp + 12), 0, 0);
+    if (!d3d_draws()) {
+        g_esp += 16;                                     /* stdcall, ret 12 */
+        return;
+    }
     D3DDevice_DrawIndexedVertices_0013A940_orig();
 }
 
@@ -680,6 +727,10 @@ void D3DDevice_DrawVerticesUP_0013A7D0(void)
 {
     capture(PATH_UP, MEM32(g_esp + 4), MEM32(g_esp + 8), MEM32(g_esp + 12), MEM32(g_esp + 16));
     native_draw(MEM32(g_esp + 4), MEM32(g_esp + 8), 0, MEM32(g_esp + 12), MEM32(g_esp + 16));
+    if (!d3d_draws()) {
+        g_esp += 20;                                     /* stdcall, ret 16 */
+        return;
+    }
     D3DDevice_DrawVerticesUP_0013A7D0_orig();
 }
 
@@ -834,7 +885,8 @@ int buffy_settings_fps_limit(void);
 static int interp_active(void)
 {
     static int hz = -1;
-    if (!buffy_settings_frame_interpolation() || nv2a_gpu_has_second_window())
+    /* above a 60 FPS limit the real frames come that fast themselves */
+    if (!buffy_settings_frame_interpolation() || nv2a_gpu_has_second_window() || buffy_settings_fps_limit() > 60)
         return 0;
     if (hz < 0) {
         DEVMODEW dm;
@@ -874,7 +926,7 @@ void buffy_native_present(void)
          * (the frame in between never holds the game back) */
         GpuTexture *it = NULL;
         LARGE_INTEGER f, now;
-        double since, frame_ms = buffy_settings_fps_limit() == 30 ? 33.333 : 16.667;
+        double since, frame_ms = 1000.0 / buffy_settings_fps_limit();
         QueryPerformanceFrequency(&f);
         QueryPerformanceCounter(&now);
         since = s_last_real.QuadPart ? (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart : 1e9;

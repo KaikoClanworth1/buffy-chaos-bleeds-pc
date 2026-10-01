@@ -1939,6 +1939,31 @@ static void bridge_KeRemoveQueueDpc(void)
  * DPC runs on the next drain rather than immediately. Nothing here depends on
  * DPC ordering beyond "after the ISR".
  */
+/* Wakes the timer thread (kernel_timer_thread): a DPC queued, a timer set,
+ * a software method posted. Between those it sleeps until the next timer is
+ * due, as a Windows program's timer thread would -- no polling -- unless a
+ * GPU is emulated (the vblank and software methods keep a 1 ms tick). */
+static HANDLE s_timer_wake;
+
+static void kernel_timer_kick(void)
+{
+    if (s_timer_wake)
+        SetEvent(s_timer_wake);
+}
+
+/* Milliseconds for timer due times: the performance counter, not
+ * GetTickCount64 (which moves in ~16 ms steps -- a 25 ms periodic timer
+ * fired every 31). */
+static long long kernel_now_ms(void)
+{
+    static LARGE_INTEGER f;
+    LARGE_INTEGER c;
+    if (!f.QuadPart)
+        QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (long long)(c.QuadPart / (f.QuadPart / 1000));
+}
+
 #define XBOX_MAX_PENDING_DPC 64
 typedef struct { uint32_t dpc, arg1, arg2; } PendingDpc;
 static PendingDpc g_dpc_queue[XBOX_MAX_PENDING_DPC];
@@ -1973,6 +1998,7 @@ static void bridge_KeInsertQueueDpc(void)
     g_dpc_queue[tail].arg2 = arg2;
     g_dpc_tail = next;
     ReleaseSRWLockExclusive(&g_dpc_lock);
+    kernel_timer_kick();
     g_eax = 1;
 }
 
@@ -2061,7 +2087,7 @@ static void kernel_vblank_tick(void)
     long long now;
 
     if (enabled < 0)
-        enabled = getenv("RECOMP_VBLANK") != NULL;
+        enabled = getenv("RECOMP_VBLANK") != NULL && getenv("RECOMP_VBLANK")[0] != '0';
     if (!enabled)
         return;
 
@@ -2138,6 +2164,7 @@ int xbox_Nv2aSoftwareMethod(uint32_t subch, uint32_t method, uint32_t data)
     s_gr_data = data;
     InterlockedExchange(&s_gr_pending, 1);
     if (s_gr_wake) SetEvent(s_gr_wake);
+    kernel_timer_kick();
     /* Bounded: a handler that never runs must not freeze the puller for good. */
     WaitForSingleObject(s_gr_done, 2000);
     return 1;
@@ -2449,6 +2476,7 @@ static int g_timer_started;
 static DWORD WINAPI kernel_timer_thread(LPVOID unused)
 {
     int slot = xbox_worker_stack_alloc();
+    int gpu_tick;
 
     (void)unused;
     if (slot < 0) {
@@ -2473,17 +2501,34 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
         g_fs_base = tib;
     }
 
+    {
+        /* A GPU emulated: its vblank and software methods need the 1 ms tick. */
+        const char *vb = getenv("RECOMP_VBLANK"), *pb = getenv("RECOMP_PB_EXEC");
+        gpu_tick = (vb && vb[0] != '0') || (pb && pb[0] != '0');
+    }
     for (;;) {
         long long now;
         int i;
+        DWORD wait = INFINITE;
 
-        /* Woken at once by a posted software method; otherwise ~1 ms tick. */
-        WaitForSingleObject(s_gr_wake ? s_gr_wake : GetCurrentThread(), s_gr_wake ? 1 : 0);
-        if (!s_gr_wake) Sleep(1);
+        now = kernel_now_ms();
+        EnterCriticalSection(&g_timer_lock);
+        for (i = 0; i < XBOX_MAX_TIMERS; i++)
+            if (g_timers[i].timer_va) {
+                long long d = g_timers[i].due_ms - now;
+                if (d < 0) d = 0;
+                if ((DWORD)d < wait) wait = (DWORD)d;
+            }
+        LeaveCriticalSection(&g_timer_lock);
+        if (gpu_tick && wait > 1)
+            wait = 1;
+        WaitForSingleObject(s_timer_wake, wait);
+#ifndef XBOXRECOMP_NO_GPU_EMULATION
         kernel_gr_service();  /* PGRAPH software methods (fences, flips) */
         kernel_vblank_tick();  /* the GPU's frame clock */
+#endif
         kernel_drain_dpcs();   /* deferred work, before due timers */
-        now = (long long)GetTickCount64();
+        now = kernel_now_ms();
 
         for (i = 0; i < XBOX_MAX_TIMERS; i++) {
             uint32_t dpc, fired_va;
@@ -2495,8 +2540,13 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
             }
             fired_va = g_timers[i].timer_va;
             dpc = g_timers[i].dpc_va;
-            if (g_timers[i].period_ms > 0)
-                g_timers[i].due_ms = now + g_timers[i].period_ms;
+            if (g_timers[i].period_ms > 0) {
+                /* the next period from this one's due time (no drift),
+                 * from now if it fell a whole period behind */
+                g_timers[i].due_ms += g_timers[i].period_ms;
+                if (g_timers[i].due_ms <= now)
+                    g_timers[i].due_ms = now + g_timers[i].period_ms;
+            }
             else
                 g_timers[i].timer_va = 0;      /* one-shot, done */
             LeaveCriticalSection(&g_timer_lock);
@@ -2528,6 +2578,7 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
 
     if (!g_timer_started) {
         InitializeCriticalSection(&g_timer_lock);
+        s_timer_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
         g_timer_started = 1;
         CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
     }
@@ -2540,10 +2591,11 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
     if (free_slot >= 0) {
         g_timers[free_slot].timer_va  = timer_va;
         g_timers[free_slot].dpc_va    = dpc_va;
-        g_timers[free_slot].due_ms    = (long long)GetTickCount64() + delay_ms;
+        g_timers[free_slot].due_ms    = kernel_now_ms() + delay_ms;
         g_timers[free_slot].period_ms = period_ms;
     }
     LeaveCriticalSection(&g_timer_lock);
+    kernel_timer_kick();                  /* its due time may be the next one */
 
     /* A freshly set timer starts unsignaled, like the real KeSetTimer. */
     {
@@ -9087,6 +9139,32 @@ static void kernel_thunk_dispatch(void)
             }
             fflush(stderr);
             last_summary_tick = now;
+        }
+    }
+    {
+        /* RECOMP_KERNEL_COUNT=1: every ordinal called so far and how often,
+         * every 30 s (the calls since the last table, so gameplay shows
+         * apart from start-up). */
+        static int on = -1;
+        static DWORD last;
+        static unsigned long long prev[XBOX_KERNEL_THUNK_TABLE_SIZE];
+        if (on < 0)
+            on = getenv("RECOMP_KERNEL_COUNT") != NULL;
+        if (on) {
+            DWORD now = GetTickCount();
+            if (!last)
+                last = now;
+            if (now - last >= 30000) {
+                int r;
+                fprintf(stderr, "  [KCOUNT] --- %.0f s ---\n", (now - last) / 1000.0);
+                for (r = 0; r < XBOX_KERNEL_THUNK_TABLE_SIZE; r++)
+                    if (g_ordinal_calls[r] != prev[r]) {
+                        fprintf(stderr, "  [KCOUNT] %3d %10llu\n", r, (unsigned long long)(g_ordinal_calls[r] - prev[r]));
+                        prev[r] = g_ordinal_calls[r];
+                    }
+                fflush(stderr);
+                last = now;
+            }
         }
     }
 

@@ -46,6 +46,17 @@ static int  s_res = DEFAULT_RES, s_vsync = 1, s_fullscreen;
 static int  s_ws_wide, s_invert_x;      /* [Display] WidescreenWide, [Controls] InvertCameraX */
 static int  s_interp;                   /* [Display] FrameInterpolation */
 static int  s_fps_limit = 60, s_show_fps, s_overlay;   /* [Display] FpsLimit, ShowFps, DebugOverlay */
+
+/* The frame rate the game runs at: 30 to 360. The game's speed does not
+ * depend on it -- the engine scales its per-frame steps by it (buffy_frame.c,
+ * buffy_frame_rate_apply). BUFFY_FPS_LIMIT overrides the setting (testing). */
+static int buffy_fps_clamp(int fps)
+{
+    const char *e = getenv("BUFFY_FPS_LIMIT");
+    if (e && atoi(e) > 0)
+        fps = atoi(e);
+    return fps < 30 ? 30 : fps > 360 ? 360 : fps;
+}
 static char s_path[MAX_PATH];
 
 void buffy_settings_save(void)
@@ -120,7 +131,7 @@ void buffy_settings_load(void)
         s_ws_wide = GetPrivateProfileIntA("Display", "WidescreenWide", 1, s_path) != 0;
         s_interp = GetPrivateProfileIntA("Display", "FrameInterpolation", 0, s_path) != 0;
         s_invert_x = GetPrivateProfileIntA("Controls", "InvertCameraX", 0, s_path) != 0;
-        s_fps_limit = GetPrivateProfileIntA("Display", "FpsLimit", 60, s_path) == 30 ? 30 : 60;
+        s_fps_limit = buffy_fps_clamp((int)GetPrivateProfileIntA("Display", "FpsLimit", 60, s_path));
         s_show_fps = GetPrivateProfileIntA("Display", "ShowFps", 0, s_path) != 0;
         s_overlay = GetPrivateProfileIntA("Display", "DebugOverlay", 0, s_path) != 0;
         /* [Game], set from the launcher's Settings tab. */
@@ -188,7 +199,7 @@ int  buffy_settings_overlay(void)   { return s_overlay; }
 
 void buffy_settings_set_fps_limit(int fps)
 {
-    s_fps_limit = fps == 30 ? 30 : 60;
+    s_fps_limit = buffy_fps_clamp(fps);
     buffy_settings_save();
 }
 

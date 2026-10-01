@@ -118,6 +118,17 @@ static volatile LONG s_busy, s_cancel;
 static HANDLE    s_game_proc;
 static int       s_settings_dirty;
 
+/* FPS limits ([Display] FpsLimit). The game keeps its speed at any of them:
+ * the engine scales its per-frame steps (buffy_frame.c). */
+static const int k_fps[] = { 30, 60, 90, 120, 144, 165, 240, 360 };
+
+static const WCHAR *fps_text(LRESULT sel)
+{
+    static WCHAR t[16];
+    swprintf_s(t, 16, L"%d", k_fps[sel >= 0 && sel < (LRESULT)(sizeof k_fps / sizeof k_fps[0]) ? sel : 1]);
+    return t;
+}
+
 static const struct { int w, h; const WCHAR *label; } k_res[] = {
     { 1920, 1080, L"1920 \x00D7 1080  (1080p, widescreen)" },
     { 2560, 1440, L"2560 \x00D7 1440  (1440p, widescreen)" },
@@ -1043,12 +1054,19 @@ static void settings_load(void)
     {
         WCHAR r[32];
         GetPrivateProfileStringW(L"Display", L"Renderer", L"vulkan", r, 32, p);
-        /* ("native", before 0.4: the default, now Vulkan) */
-        SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, !_wcsicmp(r, L"d3d11") ? 1 : !_wcsicmp(r, L"emulated") ? 2 : 0, 0);
+        /* ("native", before 0.4, and "emulated", before 0.5: Vulkan now) */
+        SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, !_wcsicmp(r, L"d3d11") ? 1 : 0, 0);
     }
     CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN,
                      GetPrivateProfileIntW(L"Display", L"Fullscreen", 1, p) ? ID_FULLSCREEN : ID_WINDOWED);
-    SendMessageW(ctl(ID_FPS_LIMIT), CB_SETCURSEL, GetPrivateProfileIntW(L"Display", L"FpsLimit", 60, p) == 30 ? 1 : 0, 0);
+    {
+        /* the listed limit nearest the setting */
+        int fps = (int)GetPrivateProfileIntW(L"Display", L"FpsLimit", 60, p), i, best = 1;
+        for (i = 0; i < (int)(sizeof k_fps / sizeof k_fps[0]); i++)
+            if (abs(k_fps[i] - fps) < abs(k_fps[best] - fps))
+                best = i;
+        SendMessageW(ctl(ID_FPS_LIMIT), CB_SETCURSEL, (WPARAM)best, 0);
+    }
     CheckDlgButton(s_wnd, ID_SHOW_FPS, GetPrivateProfileIntW(L"Display", L"ShowFps", 0, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_OVERLAY, GetPrivateProfileIntW(L"Display", L"DebugOverlay", 0, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_INTERP, GetPrivateProfileIntW(L"Display", L"FrameInterpolation", 0, p) ? BST_CHECKED : BST_UNCHECKED);
@@ -1083,11 +1101,11 @@ static int settings_save(void)
     WritePrivateProfileStringW(L"Display", L"Height", v, p);
     {
         LRESULT r = SendMessageW(ctl(ID_RENDERER), CB_GETCURSEL, 0, 0);
-        WritePrivateProfileStringW(L"Display", L"Renderer", r == 1 ? L"d3d11" : r == 2 ? L"emulated" : L"vulkan", p);
+        WritePrivateProfileStringW(L"Display", L"Renderer", r == 1 ? L"d3d11" : L"vulkan", p);
     }
     WritePrivateProfileStringW(L"Display", L"VSync", IsDlgButtonChecked(s_wnd, ID_VSYNC) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"FpsLimit",
-                               SendMessageW(ctl(ID_FPS_LIMIT), CB_GETCURSEL, 0, 0) == 1 ? L"30" : L"60", p);
+                               fps_text(SendMessageW(ctl(ID_FPS_LIMIT), CB_GETCURSEL, 0, 0)), p);
     WritePrivateProfileStringW(L"Display", L"ShowFps", IsDlgButtonChecked(s_wnd, ID_SHOW_FPS) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"DebugOverlay", IsDlgButtonChecked(s_wnd, ID_OVERLAY) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"FrameInterpolation", IsDlgButtonChecked(s_wnd, ID_INTERP) ? L"1" : L"0", p);
@@ -1106,7 +1124,7 @@ static void settings_defaults(void)
 {
     SendMessageW(ctl(ID_RESOLUTION), CB_SETCURSEL, on_steam_deck() ? 3 : 0, 0);   /* 1080p; 720p on a Deck */
     SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, 0, 0);
-    SendMessageW(ctl(ID_FPS_LIMIT), CB_SETCURSEL, 0, 0);
+    SendMessageW(ctl(ID_FPS_LIMIT), CB_SETCURSEL, 1, 0);         /* 60 */
     CheckDlgButton(s_wnd, ID_SHOW_FPS, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_OVERLAY, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_INTERP, BST_UNCHECKED);
@@ -1801,25 +1819,6 @@ static void sav_path(WCHAR *out, const WCHAR *sub)
     swprintf_s(out, MAX_PATH, L"%s\\%s", s_game_dir, sub);
 }
 
-/* Copy (or with del, delete) a folder tree; 1 when done. */
-static int sav_shell(UINT func, const WCHAR *from, const WCHAR *to)
-{
-    SHFILEOPSTRUCTW op;
-    WCHAR f[MAX_PATH + 2], t[MAX_PATH + 2];
-    memset(f, 0, sizeof f);
-    memset(t, 0, sizeof t);
-    wcscpy_s(f, MAX_PATH, from);
-    if (to)
-        wcscpy_s(t, MAX_PATH, to);
-    memset(&op, 0, sizeof op);
-    op.hwnd = s_wnd;
-    op.wFunc = func;
-    op.pFrom = f;
-    op.pTo = to ? t : NULL;
-    op.fFlags = FOF_NO_UI;
-    return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
-}
-
 static int sav_game_running(void)
 {
     if (s_game_proc && WaitForSingleObject(s_game_proc, 0) == WAIT_TIMEOUT) {
@@ -2287,18 +2286,20 @@ static void build_ui(void)
     h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 150, 252, 300, 100, ID_RENDERER);
     SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Vulkan (recommended)");
     SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Direct3D 11");
-    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Emulated Xbox GPU (fallback)");
     add(TAB_SETTINGS, L"Button", L"Performance", BS_GROUPBOX, X0, 292, 560, 110, 0);
     add(TAB_SETTINGS, L"Static", L"FPS limit", SS_LEFT, X0 + 16, 316, 120, 20, 0);
-    h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 150, 312, 110, 100, ID_FPS_LIMIT);
-    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
-    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
-    add(TAB_SETTINGS, L"Static", L"The game's speed follows its frame rate: 60 at most.",
+    h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 150, 312, 110, 240, ID_FPS_LIMIT);
+    for (i = 0; i < (int)(sizeof k_fps / sizeof k_fps[0]); i++) {
+        WCHAR t[16];
+        swprintf_s(t, 16, L"%d FPS", k_fps[i]);
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)t);
+    }
+    add(TAB_SETTINGS, L"Static", L"The game keeps its own speed at any frame rate.",
         SS_LEFT, X0 + 272, 316, 280, 20, 0);
     add(TAB_SETTINGS, L"Button", L"Show FPS counter", BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 16, 342, 180, 24, ID_SHOW_FPS);
     add(TAB_SETTINGS, L"Button", L"Debug overlay (FPS, frame times, renderer, GPU)", BS_AUTOCHECKBOX | WS_TABSTOP,
         X0 + 200, 342, 350, 24, ID_OVERLAY);
-    add(TAB_SETTINGS, L"Button", L"Frame interpolation (120 Hz+ screens; experimental)", BS_AUTOCHECKBOX | WS_TABSTOP,
+    add(TAB_SETTINGS, L"Button", L"Frame interpolation (at a 60 FPS limit; experimental)", BS_AUTOCHECKBOX | WS_TABSTOP,
         X0 + 16, 370, 330, 24, ID_INTERP);
     add(TAB_SETTINGS, L"Button", L"Preload game data (no hitches)", BS_AUTOCHECKBOX | WS_TABSTOP,
         X0 + 350, 370, 205, 24, ID_PRELOAD);

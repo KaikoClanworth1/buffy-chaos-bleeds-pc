@@ -2624,6 +2624,10 @@ void EXApp_MainUpdate_000BD240(void)
 {
     uint32_t app = g_ecx, eax, regs[4];
     {
+        void buffy_frame_rate_apply(void);
+        buffy_frame_rate_apply();                      /* the engine's frame rate: the FPS limit (buffy_frame.c) */
+    }
+    {
         uint32_t r5[5] = { g_ecx, g_ebx, g_esi, g_edi, g_esp };
         buffy_export_frame();                          /* (the launcher's model export run) */
         if (MEM32(0x26DC54)) {
@@ -2782,7 +2786,7 @@ void XItemHandler_Player_HandlePlayerDeath_00082BA0(void)
     }
     g_esp += 4;                                     /* ret */
     t = MEM32(h + 0x70C);
-    if (t < P2_RESPAWN_FRAMES) {
+    if (t < (uint32_t)P2_RESPAWN_FRAMES) {
         MEM32(h + 0x70C) = t + 1;
         return;
     }

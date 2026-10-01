@@ -61,6 +61,7 @@ typedef struct {
     GpuTexture *gt;
     DWORD    last_use;
     int      replaced;                     /* a texture pack's image (nv2a_texpack.inc) */
+    int      genmips;                      /* mip chain built here (gpu_texture) */
 } TexEntry;
 
 #define GPU_MAX_SURF 16
@@ -544,8 +545,11 @@ static int gpu_startup(void)
         s_blit_rs = gpu_raster_create(&rd);
     }
 
-    if (!s_dev)
-        goto device_objects_done;     /* (Vulkan: the emulated renderer's Direct3D objects are not made) */
+    /* The emulated renderer's Direct3D objects -- its uber-shader, compiled
+     * on every start, among them -- only for the emulated renderer: neither
+     * with Vulkan nor in native mode (the native renderer has its own). */
+    if (!s_dev || s_native)
+        goto device_objects_done;
     hr = D3DCompile(s_gpu_hlsl, strlen(s_gpu_hlsl), "nv2a", NULL, NULL, "vs", "vs_4_0", 0, 0, &vsb, &err);
     if (FAILED(hr)) goto shader_error;
     hr = D3DCompile(s_gpu_hlsl, strlen(s_gpu_hlsl), "nv2a", NULL, NULL, "ps", "ps_4_0", 0, 0, &psb, &err);
@@ -587,7 +591,7 @@ device_objects_done:
     }
 
     s_gi = (uint32_t *)malloc(sizeof(uint32_t) * GPU_MAX_IDX);
-    if (s_dev) {
+    if (s_dev && !s_native) {
         bd.ByteWidth = sizeof(uint32_t) * GPU_MAX_IDX;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
@@ -1541,6 +1545,7 @@ static GpuTexture *gpu_texture(int st, float norm[2], int *mips, int *cube)
     LARGE_INTEGER tx_t0;
     uint64_t tp_hash = 0;
     int tp_want_dump = 0;
+    int gen = 0;
 
     norm[0] = norm[1] = 1.0f;
     *mips = 0;
@@ -1610,7 +1615,7 @@ static GpuTexture *gpu_texture(int st, float norm[2], int *mips, int *cube)
                 }
                 t->last_use = now;
                 s_tx_why[4]++;
-                *mips = t->replaced ? 2 : levels > 1;
+                *mips = t->replaced ? 2 : (levels > 1 || t->genmips);
                 *cube = is_cube;
                 return t->gt;
             }
@@ -1635,6 +1640,7 @@ reupload:
     t = &s_texc[i];
     if (t->gt) { gpu_texture_release(t->gt); t->gt = NULL; }   /* (draws recorded for interpolation hold their own) */
     t->replaced = 0;
+    t->genmips = 0;
 
     /* Texture packs: a replacement from load\, or this one dumped below. */
     if (!s_tp.inited)
@@ -1659,7 +1665,14 @@ reupload:
     td.width = w; td.height = h; td.mips = levels;
     td.flags = GPU_TEX_SAMPLED | (is_cube ? GPU_TEX_CUBE : 0);
     td.format = GPU_FMT_BGRA8;
-    if (block && w >= 4 && h >= 4)
+    /* A texture with no mip chain of its own gets one: the game asks for
+     * trilinear filtering on nearly every draw, and without smaller levels a
+     * texture drawn small -- far away, or at a slant -- is sampled texel by
+     * texel and shimmers as the camera moves (the more, the higher the
+     * resolution). Built from level 0 by 2x2 averaging; a compressed one is
+     * decoded first. BUFFY_NO_GEN_MIPS=1 turns it off (testing). */
+    gen = levels == 1 && !is_cube && (w > 1 || h > 1) && !getenv("BUFFY_NO_GEN_MIPS");
+    if (block && w >= 4 && h >= 4 && !gen)
         td.format = block == 8 ? GPU_FMT_BC1 : (fmt == 0x0E ? GPU_FMT_BC2 : GPU_FMT_BC3);
 
     for (f = 0; f < faces; f++) {
@@ -1689,6 +1702,32 @@ reupload:
             }
             lo += linear ? pitch * h : tx_level_bytes(fmt, block, lw, lh);
         }
+    }
+    if (gen && npix == 1) {
+        uint32_t lw = w, lh = h;
+        const uint32_t *src = pix[0];
+        for (l = 1; (lw > 1 || lh > 1) && l < 13; l++) {
+            uint32_t nw = lw > 1 ? lw / 2 : 1, nh = lh > 1 ? lh / 2 : 1, x, y;
+            uint32_t *dst = (uint32_t *)malloc((size_t)nw * nh * 4);
+            if (!dst)
+                break;
+            pix[npix++] = dst;
+            for (y = 0; y < nh; y++) {
+                uint32_t y0 = y * 2 < lh ? y * 2 : lh - 1, y1 = y * 2 + 1 < lh ? y * 2 + 1 : lh - 1;
+                for (x = 0; x < nw; x++) {
+                    uint32_t x0 = x * 2 < lw ? x * 2 : lw - 1, x1 = x * 2 + 1 < lw ? x * 2 + 1 : lw - 1;
+                    uint32_t a = src[y0 * lw + x0], b = src[y0 * lw + x1], c = src[y1 * lw + x0], e = src[y1 * lw + x1];
+                    uint32_t out = 0, sh;
+                    for (sh = 0; sh < 32; sh += 8)
+                        out |= ((((a >> sh) & 0xFF) + ((b >> sh) & 0xFF) + ((c >> sh) & 0xFF) + ((e >> sh) & 0xFF) + 2) >> 2) << sh;
+                    dst[y * nw + x] = out;
+                }
+            }
+            sub[l].data = dst;
+            sub[l].pitch = nw * 4;
+            src = dst; lw = nw; lh = nh;
+        }
+        td.mips = l;
     }
     if (tp_want_dump) {
         if (td.format == GPU_FMT_BGRA8) {
@@ -1722,7 +1761,8 @@ out:
     s_tx_why[5]++;
     t->offset = off; t->fmt = fmt | (is_cube ? 0x100u : 0); t->w = w; t->h = h; t->pitch = pitch;
     t->levels = levels; t->hash = hash; t->last_use = now; t->checked_frame = s_frame_no;
-    *mips = levels > 1;
+    t->genmips = td.mips > 1 && levels == 1;
+    *mips = levels > 1 || t->genmips;
     *cube = is_cube;
     return t->gt;
 }
