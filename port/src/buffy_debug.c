@@ -80,7 +80,7 @@ static void write_report(const wchar_t *dir, const char *trigger)
     fprintf(f, "resolution %dx%d%s, vsync %s, %s, widescreen view %s, invert camera x %s\n",
             buffy_settings_res_width(), buffy_settings_res_height(),
             buffy_settings_widescreen() ? " (16:9)" : " (4:3)", buffy_settings_vsync() ? "on" : "off",
-            buffy_settings_fullscreen() ? "fullscreen" : "windowed",
+            buffy_settings_display_mode_name(buffy_settings_fullscreen()),
             buffy_settings_widescreen_wide() ? "wide" : "original", buffy_settings_invert_camera_x() ? "on" : "off");
     {
         const char *ini = buffy_settings_path();

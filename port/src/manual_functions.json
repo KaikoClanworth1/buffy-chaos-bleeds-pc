@@ -1,6 +1,7 @@
 {
   "0x0012EBD0": "memmove_0012EBD0",
   "0x001289F7": "GetTickCount_001289F7",
+  "0x00128A36": "XGetLanguage_00128A36",
   "0x00147CA9": "D3DXMatrixMultiply_00147CA9",
   "0x00147A70": "D3DXMatrixTranspose_00147A70",
   "0x001479D7": "D3DXVec4Transform_001479D7",
@@ -99,6 +100,8 @@
   "0x00135500": "wrap:D3DDevice_EndPush_00135500",
   "0x00138AB0": "wrap:D3DDevice_SetViewport_00138AB0",
   "0x001368E0": "wrap:D3D_CommonSetViewport_001368E0",
+  "0x000EBFE0": "wrap:EXSubMapInfoTable_CheckPortalToView_000EBFE0",
+  "0x000D7430": "wrap:EXBaseDisplay_CullBox_000D7430",
   "0x00110990": "wrap:EXSoundManager_StartMusic_00110990",
   "0x00110A00": "wrap:EXSoundManager_StartMusic_00110A00",
   "0x0009BD00": "wrap:XTrigger_InventoryUse_Active_DoUpdate_0009BD00",

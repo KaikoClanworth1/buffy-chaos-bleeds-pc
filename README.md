@@ -14,6 +14,7 @@ It also adds:
 - **Mods**: switch them on and off with a checkbox. The mods don't change the game files on disk.
 - **Story co-op**: a second player can join the campaign, in two windows or on a split screen.
 - **Texture packs**: dump the game's textures and load HD replacements, as in Dolphin and PCSX2.
+- **Android**: the same port on phones and tablets, with touch controls, controller support and its own launcher. See [Android](#android).
 
 > [!IMPORTANT]
 > **This repository has no game in it.** It holds no disc image, XBE, game data, movies or game code. You need your **own copy of the Xbox game**. Make a disc image of it (`.iso` or `.xiso`), then point the launcher at that image.
@@ -49,6 +50,7 @@ It also adds:
 - [Install and play](#install-and-play)
 - [Updates](#updates)
 - [Steam Deck and Linux (Proton)](#steam-deck-and-linux-proton)
+- [Android](#android)
 - [Controls](#controls)
 - [Settings](#settings)
 - [Graphics: Vulkan and Direct3D 11](#graphics-vulkan-and-direct3d-11)
@@ -66,7 +68,7 @@ It also adds:
 
 | | |
 |---|---|
-| 💿 **The game** | A disc image of your own *Chaos Bleeds* **Xbox** disc, as an `.iso` or `.xiso`. The PS2 and GameCube versions won't work. |
+| 💿 **The game** | A disc image of your own *Chaos Bleeds* **Xbox** disc, as an `.iso` or `.xiso`: the **European (PAL)** or the **North American (NTSC)** release. The port has each one's code, translated, and starts the right one for the disc you installed; the launcher tells you if your disc is another release. The PS2 and GameCube versions won't work. |
 | 🖥️ **PC** | Windows 10 or 11 (64-bit), with a graphics card that supports Vulkan 1.3 or Direct3D 11. Most cards from about 2016 on have Vulkan 1.3 with an up-to-date driver. Older ones use Direct3D 11 automatically. A **Steam Deck** or Linux PC through Proton should work too, but it's experimental: see [Steam Deck and Linux](#steam-deck-and-linux-proton). |
 | 💾 **Disk space** | About 4 GB for the installed game. |
 | 🎮 **Controller** | Optional. Any XInput (Xbox-style) pad works, and so does the keyboard. Co-op needs a second controller. |
@@ -87,7 +89,7 @@ It also adds:
    2. Under **Install to**, choose an empty folder.
    3. Leave **Convert the game's movies** ticked to keep the cutscene movies. If FFmpeg isn't found, click **Download FFmpeg**.
    4. Click **Install**. The launcher only reads the image and never changes it. It copies the game out (about 4 minutes) and sets up the PC version beside it.
-4. **Settings tab**: pick windowed or fullscreen, the resolution, VSync and so on.
+4. **Settings tab**: pick windowed, borderless or fullscreen, the resolution, VSync and so on.
 5. **Mods tab**: tick any mods you want. See the [mods table](#mods-what-each-one-does).
 6. **Play tab**: press **Play**.
 
@@ -140,6 +142,32 @@ From v0.3.0 the launcher updates itself. When it starts, it checks [Releases](ht
 - **No movies:** the cutscene movies play through Windows Media Foundation, which depends on the Proton version. If they're skipped, try **Proton Experimental**.
 - **Updates** work under Proton: the launcher unpacks them itself, without Windows' `tar.exe`, which Proton doesn't have.
 
+### Android
+
+> [!NOTE]
+> **New in v1.0.0.** Tested on a Samsung Galaxy Z Fold7 (Snapdragon 8 Elite, Adreno 830), on both screens, at 60 fps. Other phones should work if they meet the list below. Please [report](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/issues) how yours does.
+
+**You need:** a 64-bit ARM phone or tablet with **Android 13** or later and **Vulkan 1.3**, about 2 GB free, and a disc image of the **European (PAL)** Xbox release. The North American release isn't supported on Android yet. The installer tells you if your image is a release it can't play.
+
+**Set up:**
+
+1. Download **Buffy-Chaos-Bleeds-Android-v1.0.0.apk** from [Releases](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/releases/latest) and install it. Android asks you to allow installing apps from your browser or file manager first.
+2. Copy your `.iso` or `.xiso` to the phone.
+3. Open the app and allow **All files access** when it asks. The game lives in `games/Buffy Chaos Bleeds` on the phone's storage, laid out like the PC game folder, so you can copy saves and mods between the two.
+4. On the **Install** tab, pick your disc image and wait for it to unpack. Then press **Play**.
+
+**The app's launcher** mirrors the PC one: **Play**, **Settings** (resolution, VSync, widescreen view, language, story co-op, graphics driver), **Controls**, **Mods**, **Textures**, **Saves** (back up, restore, share) and **Install**. It can also put a home-screen shortcut with the game's logo.
+
+**Controls:**
+
+- **Touch:** an on-screen controller drawn over the game. The move stick starts where your thumb lands on the left, with the d-pad above it. A, B, X and Y sit on the right, and dragging anywhere else on the right half moves the camera. **EDIT** at the top of the screen (or **Edit the layout** on the **Controls** tab) lets you drag and resize each group of buttons over the running game. There are also settings for size, opacity, camera speed and vibration, and you can turn the touch controls off.
+- **Controllers:** Bluetooth and USB controllers work as an Xbox controller and hide the touch controls while you use them.
+- **Back gesture:** opens the game's pause menu (Start).
+
+**Graphics drivers:** under **Settings → Graphics driver** you can load a custom Vulkan driver package (a `.zip` with a `meta.json`, the kind other emulators use), such as Qualcomm's own or Mesa Turnip. If a driver can't start the game, the game uses the phone's own driver instead and the launcher says why. This release was tested with the phone's own driver. The Turnip builds tried on the Fold7 didn't work.
+
+**Not on Android yet:** movies (the cutscene videos are skipped and the story goes on), texture packs (dumping and loading them: the **Textures** tab is there for when they are), the North American release and the FPS counter.
+
 ---
 
 ## Controls
@@ -163,7 +191,7 @@ The keys below are the defaults. You can change any of them, give an action a se
 
 **While playing:**
 
-- `Alt+Enter` or `F11` switches between windowed and fullscreen.
+- `F11` or `Alt+Enter` switches between windowed and fullscreen (borderless or fullscreen, whichever you last picked).
 - Closing the window quits the game.
 - The window title shows the frame rate.
 
@@ -179,11 +207,11 @@ It works even if the game has frozen. Attach the folder when you report a proble
 
 ## Settings
 
-You can change these in the launcher's **Settings** tab. In the game, **Options → PC Settings** has Resolution, VSync, Fullscreen, FPS Limit, Show FPS and Debug Overlay. Everything is saved in `buffy_settings.ini` beside the exe.
+You can change these in the launcher's **Settings** tab. In the game, **Options → PC Settings** has Resolution, VSync, Display, FPS Limit, Overlay (off, FPS or debug) and Language (used from the next start). Everything is saved in `buffy_settings.ini` beside the exe.
 
 | Setting | What it does |
 |---|---|
-| **Windowed / Fullscreen** | Fullscreen is borderless. |
+| **Windowed / Borderless / Fullscreen** | Borderless is a window covering the monitor. Fullscreen switches the monitor to the game's resolution at the best refresh rate it has for it, and puts the desktop back when you Alt+Tab away. |
 | **Resolution** | 1920×1080 is the default. 1280×720, 2560×1440 and 3840×2160 are also 16:9. The original 4:3 sizes are 640×480, 1280×960, 1920×1440 and 2560×1920. Menus and movies stay 4:3, with bars at the sides. |
 | **VSync** | Waits for the monitor's refresh, so the picture doesn't tear. |
 | **Renderer** | **Vulkan (recommended)** or **Direct3D 11**. See [Graphics](#graphics-vulkan-and-direct3d-11). |
@@ -192,6 +220,7 @@ You can change these in the launcher's **Settings** tab. In the game, **Options 
 | **Debug overlay** | A panel in the top-left corner with the frame rate, average and worst frame time, a graph of recent frame times, the renderer in use, the resolution and VSync, and your graphics card. |
 | **Widescreen: keep the original side-to-side view** | On by default. It shows the original view with the top and bottom trimmed, which avoids pop-in and clipping at the edges of the screen. Untick it for the game's own wider view. |
 | **Skip the intro movies** | Goes straight to the title screen. |
+| **Language** | English, French, German or Spanish: the game's text, menus and logo, all from the European release's own translations. Takes effect the next time the game starts. The North American release has English only, so the setting is greyed out for it. |
 | **Invert camera left / right** | Flips the right stick's horizontal direction. |
 
 <p align="center"><img src="docs/screenshots/launcher-settings.png" alt="Launcher Settings tab" width="60%"></p>
@@ -397,6 +426,11 @@ The translated game code is **generated on your machine from your own disc**. It
    ```bash
    bash port/tools/regen.sh
    ```
+   The European disc is the one the build starts from: its `Buffy.map` names the game's functions. For the North American executable as well, unpack that disc into `game_files_usa/` and run:
+   ```bash
+   bash port/tools/regen_usa.sh
+   ```
+   It pairs that release's functions and addresses with the European release's (`port/tools/xbe_match.py`) and recompiles it into `port/src/recomp/gen_usa/`; the build then makes `buffy_chaos_bleeds_usa.exe` from the same source, with the addresses translated (`port/tools/translate_release.py`).
 3. Build:
    ```bash
    cmake -S port -B port/build -A x64
@@ -430,6 +464,7 @@ The translated game code is **generated on your machine from your own disc**. It
 ## Troubleshooting
 
 - **The launcher says the disc image isn't Chaos Bleeds.** Only the **Xbox** version is supported, and the image must be a full disc image, not just the game partition.
+- **The launcher (or the game) says the disc is a different release.** The port runs the European (PAL) release, version 2, and the North American release, version 1, each with its own executable (`buffy_chaos_bleeds.exe` and `buffy_chaos_bleeds_usa.exe`, which the first starts for a North American install). Another release would start and then stop before the title screen, so the game checks and says so instead.
 - **There are no cutscene movies.** FFmpeg wasn't available during install. Get FFmpeg, then install again with **Convert the game's movies** ticked.
 - **The game closed unexpectedly.** `buffy_log.txt` beside the exe records why. Please include it when you report a problem.
 - **The game shows a black window, or closes at start.** In the launcher's **Settings**, set **Renderer** to **Direct3D 11**, and update your graphics driver. Please report it with `buffy_log.txt`: its `[VK]` lines say what Vulkan found.

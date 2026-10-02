@@ -58,6 +58,15 @@ static VkPresentModeKHR pick_mode(GpuSwapchain *s, int vsync)
     return immediate ? VK_PRESENT_MODE_IMMEDIATE_KHR : mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
 }
 
+/* Android: an upright chain on a screen turned round is SUBOPTIMAL every
+ * frame (the compositor turns it), and fine; size changes are caught by the
+ * window's size, looked at every frame (vk_swapchain_begin). */
+#if defined(__ANDROID__)
+#define SUBOPTIMAL_IS_TURNED 1
+#else
+#define SUBOPTIMAL_IS_TURNED 0
+#endif
+
 /* (Re)creates the chain at the window's size. 0 when the window has no area
  * (minimised): the old chain, if any, stays. */
 static int build_chain(GpuSwapchain *s)
@@ -71,10 +80,19 @@ static int build_chain(GpuSwapchain *s)
 
     window_size(s->window, &w, &h);
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_phys, s->surf, &caps);
+    fprintf(stderr, "  [VK] swap chain: window %ux%u, surface %ux%u, transform %X\n", w, h,
+            caps.currentExtent.width, caps.currentExtent.height, (unsigned)caps.currentTransform);
+#if !defined(__ANDROID__)
     if (caps.currentExtent.width != 0xFFFFFFFFu) {
         w = caps.currentExtent.width;
         h = caps.currentExtent.height;
     }
+#endif
+    /* (Android: the surface's extent is the screen's own way up -- turned
+     * round 90 or 270, it is the window's swapped. The chain is the window's
+     * size, drawn upright, and the compositor turns it, as SVR11's
+     * presenter does. Passing the screen's transform through without turning
+     * the picture showed it squashed on a Fold held the other way.) */
     if (w == 0 || h == 0)
         return 0;
     if (w < caps.minImageExtent.width) w = caps.minImageExtent.width;
@@ -109,7 +127,12 @@ static int build_chain(GpuSwapchain *s)
     ci.imageArrayLayers = 1;
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+#if defined(__ANDROID__)
+    ci.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+                    ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
+#else
     ci.preTransform = caps.currentTransform;
+#endif
     ci.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
                       ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
     ci.presentMode = pick_mode(s, s->want_vsync);
@@ -237,6 +260,13 @@ GpuTexture *vk_swapchain_begin(GpuSwapchain *s, int resize)
     VkResult r;
     if (!s)
         return NULL;
+#if defined(__ANDROID__)
+    /* A window that changes shape (unfolded, turned round -- Android 16
+     * ignores the landscape lock on big screens) keeps its surface, and a
+     * chain of the old size is just scaled to it, stretched: no OUT_OF_DATE
+     * says so. The size is looked at every frame. */
+    resize = 1;
+#endif
     if (resize && !s->acquired) {
         window_size(s->window, &w, &h);
         if (w && h && (w != s->w || h != s->h))
@@ -258,7 +288,7 @@ GpuTexture *vk_swapchain_begin(GpuSwapchain *s, int resize)
         PROF_END(0, PR_ACQUIRE);
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
             return NULL;
-        if (r == VK_SUBOPTIMAL_KHR)
+        if (r == VK_SUBOPTIMAL_KHR && !SUBOPTIMAL_IS_TURNED)
             s->recreate = 1;
         if (s_nwaits < 8)
             s_waits[s_nwaits++] = sem;
@@ -301,6 +331,6 @@ void vk_swapchain_present(GpuSwapchain *s, int vsync)
         prof_frame();
     }
     s->acquired = 0;
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || s->want_vsync != s->vsync)
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || (r == VK_SUBOPTIMAL_KHR && !SUBOPTIMAL_IS_TURNED) || s->want_vsync != s->vsync)
         s->recreate = 1;
 }

@@ -13,6 +13,8 @@ BIN="$ROOT/port/build/Release"
 mkdir -p "$DST"
 cp -f "$BIN/buffy_chaos_bleeds.exe" "$DST/"
 cp -f "$BIN/buffy_chaos_bleeds.pdb" "$DST/" 2>/dev/null || true
+# the North American release's executable (when built: tools/regen_usa.sh)
+cp -f "$BIN/buffy_chaos_bleeds_usa.exe" "$BIN/buffy_chaos_bleeds_usa.pdb" "$DST/" 2>/dev/null || true
 cp -f "$BIN/Buffy Launcher.exe" "$DST/"
 cp -f "$ROOT/port/tools/ReadMe.txt" "$DST/Read Me.txt"
 

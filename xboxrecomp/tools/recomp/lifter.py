@@ -1993,7 +1993,16 @@ class Lifter:
         if len(ops) < 2:
             return [f"/* shift: bad operands */"]
         dst = _fmt_operand_read(ops[0])
-        cnt = _fmt_operand_read(ops[1])
+        # The count masked to 5 bits, as x86 does for 8-, 16- and 32-bit
+        # operands (as _lift_sar does). Unmasked, "shl eax, cl" with cl = 40
+        # is a C shift past the type's width: undefined, and while MSVC's x86
+        # code happens to mask it, clang on ARM folded it -- a box's clip bits
+        # came out wrong in EXBaseDisplay::CullBox (0xD7430), whose loop
+        # shifts by 0..56, and on Android walls and shop fronts went missing.
+        if ops[1].type == "imm":
+            cnt = f"{ops[1].imm & 31}"
+        else:
+            cnt = f"(({_fmt_operand_read(ops[1])}) & 31u)"
         out = []
         if self.needs_cf:
             w = (_operand_width(ops[0]) or 4) * 8
@@ -3046,16 +3055,19 @@ class Lifter:
             if nops >= 2:
                 src = _fmt_operand_read(ops[1])
                 return [_sse_write(ops[0], f"(float)(int32_t){src}") + " /* cvtsi2ss */"]
-        if m in ("cvtss2si", "cvttss2si"):
+        if m in ("cvtss2si", "cvttss2si", "cvtsd2si", "cvttsd2si"):
+            # x86's own conversion: cvtt* truncate, cvt* round to nearest (the
+            # MXCSR's default), and a NaN or out-of-range value is the integer
+            # indefinite 0x80000000. A C cast is undefined there -- ARM
+            # saturates instead -- which sent the game's screen-space culling
+            # the other way on Android (rooms drawn through walls).
             if nops >= 2:
-                return [_fmt_operand_write(ops[0], f"(int32_t){_sse_read(ops[1])}") + f" /* {m} */"]
+                t = "1" if m.startswith("cvtt") else "0"
+                return [_fmt_operand_write(ops[0], f"recomp_cvt_si((double){_sse_read(ops[1])}, {t})") + f" /* {m} */"]
         if m == "cvtsi2sd":
             if nops >= 2:
                 src = _fmt_operand_read(ops[1])
                 return [_sse_write(ops[0], f"(double)(int32_t){src}") + " /* cvtsi2sd */"]
-        if m in ("cvtsd2si", "cvttsd2si"):
-            if nops >= 2:
-                return [_fmt_operand_write(ops[0], f"(int32_t){_sse_read(ops[1])}") + f" /* {m} */"]
         if m == "cvtss2sd":
             if nops >= 2:
                 return [_sse_write(ops[0], f"(double){_sse_read(ops[1])}") + " /* cvtss2sd */"]
@@ -3658,6 +3670,21 @@ def lift_basic_block(lifter, bb, flag_state=None):
                 " if (_fca != _fca || _fcb != _fcb) _ah |= 0x45u;"
                 " else if (_fca < _fcb) _ah |= 0x01u;"
                 " else if (_fca == _fcb) _ah |= 0x40u;"
+                " eax = (eax & 0xFFFF00FFu) | (_ah << 8); } /* lahf after "
+                + last_flag_setter + " */"]
+        elif (curr.mnemonic == "lahf"
+                and last_flag_setter in ("fcompi", "fcomip", "fucomi", "fucompi",
+                                         "fucomip", "fcomi")):
+            # The same idiom on the x87: fucomip; fstp st(0); lahf; test ah,
+            # 0x44; jnp. g_fp_cmp holds the compare (2 unordered, -1 below, 0
+            # equal). EXBaseCamera::SetFOV is one: with AH stale it zeroed the
+            # camera's screen scale on some frames, and the portal test then
+            # dropped whole rooms -- the flicker past the Magic Box doorway.
+            results = [
+                "{ uint32_t _ah = 0x02u;"
+                " if (g_fp_cmp == 2) _ah |= 0x45u;"
+                " else if (g_fp_cmp < 0) _ah |= 0x01u;"
+                " else if (g_fp_cmp == 0) _ah |= 0x40u;"
                 " eax = (eax & 0xFFFF00FFu) | (_ah << 8); } /* lahf after "
                 + last_flag_setter + " */"]
         else:

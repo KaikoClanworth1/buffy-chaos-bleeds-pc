@@ -46,9 +46,11 @@
 #ifndef XBOXRECOMP_D3D8_VSH_H
 #define XBOXRECOMP_D3D8_VSH_H
 
+#if defined(_WIN32)
 #include <d3d11.h>
+#endif
 #include <stdint.h>
-#include <windows.h>
+#include "platform/xbox_winnt.h"
 
 #ifdef __cplusplus
 extern "C" {

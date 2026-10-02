@@ -86,6 +86,7 @@ typedef struct {
 static uint32_t s_nvp_code[VP_SLOTS][4];     /* the program memory, as loaded */
 static float    s_nconst[192][4];            /* the vertex shader constants */
 static uint32_t s_nvp_gen = 1;               /* bumped on every program load */
+static void nsk_record(char type, const void *data, uint32_t len);   /* (the shader key journal, below) */
 static uint32_t s_nvb_pos, s_nib_pos;        /* ring positions in the shared vertex / index buffers */
 static uint32_t s_ntex_regs[(NV_TEX_LAST - NV_TEX_FIRST) / 4 + 1];
 static uint32_t *s_tex_src_saved;
@@ -292,6 +293,12 @@ static GpuShader *nvs_program(uint32_t start, int *uses_viewport, uint32_t mask)
     *uses_viewport = e->uses_viewport;
     s_nvs_count++;
     last_start = start; last_gen = s_nvp_gen; last_mask = mask; last_vs = e->vs; last_uv = e->uses_viewport;
+    {
+        static uint8_t rec[4 + VP_SLOTS * 16];
+        memcpy(rec, &mask, 4);
+        memcpy(rec + 4, s_nvp_code[start], len * 16);
+        nsk_record('V', rec, 4 + len * 16);
+    }
     return e->vs;
 }
 
@@ -390,8 +397,12 @@ static int nff_generate(const NFfKey *k, char *out, int cap)
     b.p = out; b.n = 0; b.cap = cap;
     out[0] = 0;
     sb_add(&b, "%s", s_psh_head);
-    sb_add(&b, "float4 ps(P i, out float pdepth : SV_Depth) : SV_Target {\n");
-    sb_add(&b, "  pdepth = i.fog.z > 0.5 ? i.fog.y : i.p.z;\n");    /* (W-buffering: nv2a_pb_vsh.inc) */
+    if (getenv("BUFFY_NO_SV_DEPTH")) {
+        sb_add(&b, "float4 ps(P i) : SV_Target {\n");          /* (testing: no per-pixel depth) */
+    } else {
+        sb_add(&b, "float4 ps(P i, out float pdepth : SV_Depth) : SV_Target {\n");
+        sb_add(&b, "  pdepth = i.fog.z > 0.5 ? i.fog.y : i.p.z;\n");    /* (W-buffering: nv2a_pb_vsh.inc) */
+    }
     sb_add(&b, "  float4 t0 = 0, t1 = 0, t2 = 0, t3 = 0, tmp = 0;\n");
     for (st = 0; st < 4; st++)
         if (k->bound & (1u << st))
@@ -436,7 +447,126 @@ static GpuShader *nff_get(const NFfKey *k)
         s_nff[s_nff_count].ps = ps;
         s_nff_count++;
     }
+    if (ps)
+        nsk_record('F', k, sizeof *k);
     return ps;
+}
+
+/* A register-combiner pixel shader, by its key (the shared cache in
+ * nv2a_pb_psh.inc). */
+static GpuShader *nps_get(const PsKey *k)
+{
+    static char src[32768];
+    GpuShader *ps = NULL;
+    int i;
+    for (i = 0; i < s_ps_count; i++)
+        if (!memcmp(&s_ps_cache[i].key, k, sizeof *k))
+            return s_ps_cache[i].ps;
+    if (psh_generate(k, src, sizeof src) && (ps = gpu_shader_create(GPU_PS, src, "ps")) != NULL) {
+        if (s_ps_count < PS_CACHE) {
+            s_ps_cache[s_ps_count].key = *k;
+            s_ps_cache[s_ps_count].ps = ps;
+            s_ps_count++;
+        }
+        nsk_record('P', k, sizeof *k);
+    }
+    return ps;
+}
+
+/* ── shaders made at start-up ─────────────────────────────────────────────
+ *
+ * The game's shaders are the native renderer's translations of what it sets
+ * up -- vertex programs, combiner and texture-stage setups -- made the first
+ * time a draw needs each one. Compiling one takes milliseconds, so a new
+ * effect or move hitched the frame it first appeared. Each one's key is noted
+ * here (ShaderCache\shader_keys.bin, a few bytes each), and at start-up every
+ * key noted in earlier runs is made again before the first frame: from the
+ * compiled-shader cache beside it when the generator's output is unchanged,
+ * compiled when it changed (a new version of the port). So only a shader
+ * never seen on this PC is made during play. BUFFY_NO_SHADER_PREWARM=1 skips
+ * it (testing). */
+static FILE *s_nsk;
+static int s_nsk_replaying;
+
+static int nsk_path(char *path, size_t n)
+{
+    char *slash;
+    GetModuleFileNameA(NULL, path, (DWORD)n);
+    slash = strrchr(path, '\\');
+    if (!slash)
+        return 0;
+    sprintf_s(slash + 1, n - (size_t)(slash + 1 - path), "ShaderCache");
+    CreateDirectoryA(path, NULL);
+    sprintf_s(slash + 1, n - (size_t)(slash + 1 - path), "ShaderCache\\shader_keys.bin");
+    return 1;
+}
+
+/* One key: type ('V' vertex program, 'F' texture stages, 'P' combiners),
+ * its length, its bytes. */
+static void nsk_record(char type, const void *data, uint32_t len)
+{
+    uint8_t hdr[5];
+    if (s_nsk_replaying || getenv("BUFFY_NO_SHADER_PREWARM"))
+        return;
+    if (!s_nsk) {
+        char path[MAX_PATH];
+        if (!nsk_path(path, sizeof path) || !(s_nsk = fopen(path, "ab")))
+            return;
+    }
+    hdr[0] = (uint8_t)type;
+    memcpy(hdr + 1, &len, 4);
+    fwrite(hdr, 1, 5, s_nsk);
+    fwrite(data, 1, len, s_nsk);
+    fflush(s_nsk);
+}
+
+void nv2a_native_prewarm(void)
+{
+    char path[MAX_PATH];
+    uint8_t hdr[5], *buf;
+    uint32_t len, n[3] = { 0, 0, 0 };
+    LARGE_INTEGER f, t0, t1;
+    FILE *fp;
+    static uint32_t saved[VP_SLOTS][4];
+    if (getenv("BUFFY_NO_SHADER_PREWARM") || !nsk_path(path, sizeof path) || !(fp = fopen(path, "rb")))
+        return;
+    if (!(buf = (uint8_t *)malloc(4 + VP_SLOTS * 16 + 4096))) {
+        fclose(fp);
+        return;
+    }
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+    s_nsk_replaying = 1;
+    memcpy(saved, s_nvp_code, sizeof saved);
+    while (fread(hdr, 1, 5, fp) == 5) {
+        memcpy(&len, hdr + 1, 4);
+        if (len > 4 + VP_SLOTS * 16 + 4096 || fread(buf, 1, len, fp) != len)
+            break;
+        if (hdr[0] == 'V' && len > 4 && (len - 4) % 16 == 0 && (len - 4) / 16 <= VP_SLOTS) {
+            uint32_t mask;
+            int uv;
+            memcpy(&mask, buf, 4);
+            memset(s_nvp_code, 0, sizeof s_nvp_code);
+            memcpy(s_nvp_code, buf + 4, len - 4);
+            s_nvp_gen++;
+            if (nvs_program(0, &uv, mask))
+                n[0]++;
+        } else if (hdr[0] == 'F' && len == sizeof(NFfKey)) {
+            if (nff_get((const NFfKey *)buf))
+                n[1]++;
+        } else if (hdr[0] == 'P' && len == sizeof(PsKey)) {
+            if (nps_get((const PsKey *)buf))
+                n[2]++;
+        }                                        /* (another version's key: not made) */
+    }
+    memcpy(s_nvp_code, saved, sizeof saved);
+    s_nvp_gen++;
+    s_nsk_replaying = 0;
+    fclose(fp);
+    free(buf);
+    QueryPerformanceCounter(&t1);
+    fprintf(stderr, "[SHADERS] made at start-up: %u vertex, %u texture-stage, %u combiner shaders in %.0f ms\n",
+            n[0], n[1], n[2], (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart);
 }
 
 /* ── state ── */
@@ -1616,21 +1746,7 @@ static int nv2a_native_draw_one(const NativeDraw *d, GpuTexture *rt, GpuTexture 
         k.tex_cube = cube;
         gpu_argb(d->rs[NRS_PS_FINALCONST0], &cb[88]);
         gpu_argb(d->rs[NRS_PS_FINALCONST1], &cb[92]);
-        ps = NULL;
-        {
-            /* the shared combiner cache, by its key */
-            static char src[32768];
-            for (i = 0; i < (uint32_t)s_ps_count; i++)
-                if (!memcmp(&s_ps_cache[i].key, &k, sizeof k)) { ps = s_ps_cache[i].ps; break; }
-            if (i == (uint32_t)s_ps_count && psh_generate(&k, src, sizeof src)
-                    && (ps = gpu_shader_create(GPU_PS, src, "ps")) != NULL) {
-                if (s_ps_count < PS_CACHE) {
-                    s_ps_cache[s_ps_count].key = k;
-                    s_ps_cache[s_ps_count].ps = ps;
-                    s_ps_count++;
-                }
-            }
-        }
+        ps = nps_get(&k);                          /* the shared combiner cache, by its key */
     } else {
         NFfKey k;
         memset(&k, 0, sizeof k);

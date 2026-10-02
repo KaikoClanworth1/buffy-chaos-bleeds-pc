@@ -15,7 +15,12 @@
  *
  * Cube maps are left alone.
  */
+#if defined(_WIN32)
 #include <wincodec.h>
+#else
+typedef struct IWICImagingFactory IWICImagingFactory;   /* (no WIC: PNG loading is Windows-only for now) */
+#define IWICImagingFactory_Release(f) ((void)(f), 0u)
+#endif
 #if defined(_MSC_VER)
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
@@ -122,6 +127,7 @@ static uint64_t tp_texture_hash(const uint8_t *lvl0, uint32_t fmt, uint32_t bloc
     return tp_fmix(k);
 }
 
+#if defined(_WIN32)
 /* ── WIC ── */
 
 static IWICImagingFactory *tp_wic(void)
@@ -197,6 +203,14 @@ done:
     if (d) IWICBitmapDecoder_Release(d);
     return px;
 }
+
+#else
+static IWICImagingFactory *tp_wic(void) { return NULL; }
+static int tp_write_png(IWICImagingFactory *f, const WCHAR *path, const uint32_t *px, uint32_t w, uint32_t h)
+{ (void)f; (void)path; (void)px; (void)w; (void)h; return 0; }
+static uint32_t *tp_read_image(IWICImagingFactory *f, const WCHAR *path, uint32_t *w, uint32_t *h)
+{ (void)f; (void)path; (void)w; (void)h; return NULL; }
+#endif
 
 /* ── replacements ── */
 

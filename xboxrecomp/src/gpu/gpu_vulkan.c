@@ -36,6 +36,7 @@
 #endif
 #if defined(__ANDROID__)
 #include <android/native_window.h>
+#include <dlfcn.h>
 #endif
 
 #include "gpu.h"
@@ -158,6 +159,7 @@ struct GpuTexture {
     VmaAllocation rb_mem;
     uint8_t *rb_map;
     uint64_t rb_serial;
+    GpuFormat soft_bc;                        /* BC data decoded to RGBA8 here (no BC on the GPU): its format */
 };
 
 struct GpuSampler { VkSampler s; volatile long refs; uint64_t last_use; };
@@ -215,6 +217,7 @@ static VkSemaphore s_waits[8];
 static int s_nwaits;
 static char s_adapter[256];
 static int s_custom_border;
+static int s_soft_bc;                         /* decode BC1-3 on the CPU (the GPU has no BC, or BUFFY_VK_SOFT_BC) */
 static VkFormat s_depth_fmt = VK_FORMAT_D24_UNORM_S8_UINT;
 static VkDeviceSize s_ubo_align = 256;
 static VkDescriptorSetLayout s_dsl;
@@ -358,6 +361,13 @@ static struct {
     int cull, ff, topo, dt, dw, dcmp, stt, sfail, spass, sdfail, scmp;
     uint32_t rmask, wmask, ref;
 } s_dyn;
+
+/* Qualcomm's driver loses the dynamic state (cull mode, depth test...) set
+ * in an earlier render pass, though Vulkan keeps it for the command buffer:
+ * draws then ran with stale state -- walls culled away, the sky showing
+ * through. There each pass sets it all again (begin_rendering;
+ * BUFFY_VK_DYN_PER_PASS=0/1 overrides, for testing). */
+static int s_dyn_per_pass;
 static struct {
     GpuShader *vs, *ps;
     GpuLayout *il;
@@ -524,6 +534,7 @@ static uint8_t *staging_alloc(VkDeviceSize bytes, VkBuffer *buf, VkDeviceSize *o
     memset(&ai, 0, sizeof ai);
     ai.usage = VMA_MEMORY_USAGE_AUTO;
     ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    ai.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;   /* (mapped and never flushed: phones have non-coherent types) */
     if (vmaCreateBuffer(s_vma, &bi, &ai, buf, &mem, &inf) != VK_SUCCESS)
         return NULL;
     *off = 0;
@@ -561,6 +572,7 @@ static int oneshot_begin(OneShot *o, VkDeviceSize bytes)
         memset(&vai, 0, sizeof vai);
         vai.usage = VMA_MEMORY_USAGE_AUTO;
         vai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        vai.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;   /* (mapped and never flushed: phones have non-coherent types) */
         if (vmaCreateBuffer(s_vma, &bci, &vai, &o->stage, &o->stage_mem, &inf) != VK_SUCCESS) {
             vkFreeCommandBuffers(s_dev, s_upool, 1, &o->cb);
             unlock(&s_ulock);
@@ -649,6 +661,27 @@ static GpuTexture *make_dummy(int cube);
 
 static void vk_pcache_init(void);           /* (gpu_vk_draw.inc) */
 
+#if defined(__ANDROID__)
+/* A custom driver that loaded and then could not start the game (no Vulkan
+ * 1.3 device, or no instance or device from it): the phone's own instead,
+ * with the reason where the launcher shows it (android_driver.c). */
+static int s_custom_driver;
+#define CUSTOM_DRIVER_FALLBACK(why) do { \
+        if (s_custom_driver) { \
+            extern void gpu_vk_custom_driver_failed(const char *) __attribute__((weak)); \
+            if (gpu_vk_custom_driver_failed) gpu_vk_custom_driver_failed(why); \
+            if (s_dev) { vkDestroyDevice(s_dev, NULL); s_dev = VK_NULL_HANDLE; } \
+            if (s_inst) { vkDestroyInstance(s_inst, NULL); s_inst = VK_NULL_HANDLE; } \
+            s_phys = VK_NULL_HANDLE; \
+            s_custom_driver = 0; \
+            setenv("BUFFY_GPU_DRIVER", "", 1); \
+            return vk_init(window); \
+        } \
+    } while (0)
+#else
+#define CUSTOM_DRIVER_FALLBACK(why) do { } while (0)
+#endif
+
 int vk_init(void *window)
 {
     VkApplicationInfo app;
@@ -662,10 +695,27 @@ int vk_init(void *window)
     (void)window;
     if (s_up)
         return 1;
+#if defined(__ANDROID__)
+    {
+        /* A custom driver (the app's: Turnip and the like) when it gives a
+         * loader; else the phone's (port/android/src/android_driver.c). */
+        extern void *gpu_vk_open_loader(void) __attribute__((weak));
+        void *h = gpu_vk_open_loader ? gpu_vk_open_loader() : NULL;
+        PFN_vkGetInstanceProcAddr gipa = h ? (PFN_vkGetInstanceProcAddr)dlsym(h, "vkGetInstanceProcAddr") : NULL;
+        s_custom_driver = gipa != NULL;
+        if (gipa)
+            volkInitializeCustom(gipa);
+        else if (volkInitialize() != VK_SUCCESS) {
+            fprintf(stderr, "  [VK] no Vulkan loader\n");
+            return 0;
+        }
+    }
+#else
     if (volkInitialize() != VK_SUCCESS) {
         fprintf(stderr, "  [VK] no Vulkan loader\n");
         return 0;
     }
+#endif
     memset(&app, 0, sizeof app);
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "Buffy the Vampire Slayer: Chaos Bleeds";
@@ -691,6 +741,8 @@ int vk_init(void *window)
         if (vkCreateInstance(&ici, NULL, &s_inst) != VK_SUCCESS)
             s_inst = VK_NULL_HANDLE;
     }
+    if (!s_inst)
+        CUSTOM_DRIVER_FALLBACK("it can't start Vulkan here");
     if (!s_inst) {
         fprintf(stderr, "  [VK] instance creation failed\n");
         return 0;
@@ -712,9 +764,14 @@ int vk_init(void *window)
             best = score;
             s_phys = devs[i];
             snprintf(s_adapter, sizeof s_adapter, "%s", p.deviceName);   /* (the overlay names the renderer) */
+            s_dyn_per_pass = p.vendorID == 0x5143;      /* Qualcomm (s_dyn) */
             s_ubo_align = p.limits.minUniformBufferOffsetAlignment ? p.limits.minUniformBufferOffsetAlignment : 256;
         }
     }
+    if (getenv("BUFFY_VK_DYN_PER_PASS"))
+        s_dyn_per_pass = getenv("BUFFY_VK_DYN_PER_PASS")[0] == '1';
+    if (!s_phys)
+        CUSTOM_DRIVER_FALLBACK("it has no Vulkan 1.3 GPU for this phone");
     if (!s_phys) {
         fprintf(stderr, "  [VK] no Vulkan 1.3 device\n");
         return 0;
@@ -733,7 +790,7 @@ int vk_init(void *window)
         /* D24S8 where the GPU has it (NVIDIA, Intel), else D32S8 (AMD) */
         VkFormatProperties fp;
         vkGetPhysicalDeviceFormatProperties(s_phys, VK_FORMAT_D24_UNORM_S8_UINT, &fp);
-        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) || getenv("BUFFY_VK_D32"))
             s_depth_fmt = VK_FORMAT_D32_SFLOAT_S8_UINT;
     }
     {
@@ -772,7 +829,16 @@ int vk_init(void *window)
         f13.dynamicRendering = VK_TRUE;
         f13.synchronization2 = VK_TRUE;
         f2.features.depthClamp = VK_TRUE;
-        f2.features.textureCompressionBC = VK_TRUE;
+        {
+            /* BC textures where the GPU has them; else (phones without them,
+             * or BUFFY_VK_SOFT_BC=1 for testing) decoded on the CPU at upload */
+            VkPhysicalDeviceFeatures have;
+            vkGetPhysicalDeviceFeatures(s_phys, &have);
+            s_soft_bc = !have.textureCompressionBC || (getenv("BUFFY_VK_SOFT_BC") && getenv("BUFFY_VK_SOFT_BC")[0] == '1');
+            f2.features.textureCompressionBC = s_soft_bc ? VK_FALSE : VK_TRUE;
+            if (s_soft_bc)
+                fprintf(stderr, "  [VK] BC textures decoded on the CPU%s\n", have.textureCompressionBC ? " (BUFFY_VK_SOFT_BC)" : "");
+        }
         if (s_custom_border) {
             dext[ndext++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
             fcb.customBorderColors = VK_TRUE;
@@ -787,6 +853,8 @@ int vk_init(void *window)
         dci.enabledExtensionCount = ndext;
         dci.ppEnabledExtensionNames = dext;
         if (vkCreateDevice(s_phys, &dci, NULL, &s_dev) != VK_SUCCESS) {
+            s_dev = VK_NULL_HANDLE;
+            CUSTOM_DRIVER_FALLBACK("it can't make a GPU device with what the game needs");
             fprintf(stderr, "  [VK] device creation failed\n");
             return 0;
         }
@@ -849,6 +917,7 @@ int vk_init(void *window)
             memset(&vai, 0, sizeof vai);
             vai.usage = VMA_MEMORY_USAGE_AUTO;
             vai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            vai.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;   /* (mapped and never flushed: phones have non-coherent types) */
             if (vmaCreateBuffer(s_vma, &bi, &vai, &s_frames[i].ring, &s_frames[i].ring_mem, &inf) != VK_SUCCESS)
                 return 0;
             s_frames[i].ring_ptr = (uint8_t *)inf.pMappedData;

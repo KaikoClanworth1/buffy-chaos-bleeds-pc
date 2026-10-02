@@ -286,6 +286,26 @@ void D3DDevice_Swap_0013A070(void)
     buffy_settings_frame();                 /* widescreen flags, 16:9 or 4:3 frame */
     buffy_mods_frame();
     pace_60hz();
+    {
+        /* (testing) BUFFY_HITCH_LOG=1: each frame over 30 ms, and when */
+        static int on = -1;
+        static LARGE_INTEGER f, last, t0;
+        LARGE_INTEGER now;
+        if (on < 0) {
+            on = getenv("BUFFY_HITCH_LOG") != NULL;
+            QueryPerformanceFrequency(&f);
+        }
+        if (on) {
+            double ms;
+            QueryPerformanceCounter(&now);
+            if (!t0.QuadPart)
+                t0 = now;
+            ms = last.QuadPart ? (double)(now.QuadPart - last.QuadPart) * 1000.0 / (double)f.QuadPart : 0.0;
+            if (ms > 30.0 && (now.QuadPart - t0.QuadPart) / f.QuadPart > 1)
+                fprintf(stderr, "[HITCH] %.0f ms at %.1f s\n", ms, (double)(now.QuadPart - t0.QuadPart) / (double)f.QuadPart);
+            last = now;
+        }
+    }
     D3DDevice_Swap_0013A070_orig();
     {
         /* the next frame's work starts now (frame interpolation, buffy_native.c) */
@@ -306,6 +326,7 @@ static volatile LONGLONG s_last_swap;
 
 static DWORD WINAPI stall_monitor(LPVOID unused)
 {
+#if defined(_WIN32) /* guard */
     LARGE_INTEGER f, now;
     char buf[sizeof(SYMBOL_INFO) + 256];
     SYMBOL_INFO *sym = (SYMBOL_INFO *)buf;
@@ -335,6 +356,10 @@ static DWORD WINAPI stall_monitor(LPVOID unused)
             }
         }
     }
+#else
+    (void)unused;
+    return 0;
+#endif
 }
 
 void buffy_frame_note_swap(void)
@@ -358,6 +383,7 @@ void buffy_frame_note_swap(void)
     s_last_swap = now.QuadPart;
 }
 
+#if defined(_WIN32) /* guard */
 /* ── memory sampler (BUFFY_MEMSTATS=1) ──────────────────────────────────
  * Every 10 s: private bytes, working set and peak, and the GPU's local
  * memory in use, to catch anything that grows without bound. */
@@ -488,3 +514,6 @@ void buffy_memstats_start(void)
     if (getenv("BUFFY_MEMSTATS"))
         CloseHandle(CreateThread(NULL, 0, mem_monitor, NULL, 0, NULL));
 }
+#else
+void buffy_memstats_start(void) {}
+#endif

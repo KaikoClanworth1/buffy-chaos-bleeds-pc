@@ -38,10 +38,25 @@ void memmove_0012EBD0(void)
  * Reads the kernel's KeTickCount, which on the console the timer interrupt
  * advances. Nothing here is an interrupt: the milliseconds come from Windows
  * directly, the same unit and origin the kernel's copy was kept at. */
+#if defined(_WIN32)
 __declspec(dllimport) unsigned long __stdcall GetTickCount(void);
+#else
+#include <windows.h>                        /* (xboxrecomp's POSIX shim) */
+#endif
 
 void GetTickCount_001289F7(void)
 {
     g_eax = (uint32_t)GetTickCount();
+    g_esp += 4;
+}
+
+/* DWORD XGetLanguage(void) -- 0x00128A36, XAPI: the dashboard's language,
+ * which picks the game's text. Here the launcher's Language setting
+ * (buffy_settings.c). */
+int buffy_settings_language_code(void);
+
+void XGetLanguage_00128A36(void)
+{
+    g_eax = (uint32_t)buffy_settings_language_code();
     g_esp += 4;
 }

@@ -1,5 +1,6 @@
 /**
- * PC display settings: resolution, vsync, fullscreen.
+ * PC display settings: resolution, vsync, display mode (windowed, borderless
+ * or fullscreen).
  *
  * Kept in buffy_settings.ini beside the exe, applied to the D3D11 backend
  * (nv2a_gpu_set_display) at start-up and whenever the Options page or the
@@ -27,7 +28,8 @@ void nv2a_gpu_set_display(int width, int height, int vsync, int fullscreen);
 void nv2a_gpu_set_display_callback(void (*cb)(int fullscreen));
 void nv2a_gpu_set_frame_widescreen(int wide);
 void nv2a_gpu_set_texture_pack(const wchar_t *root, int dump, int load, int prefetch);
-void nv2a_gpu_set_overlay(int mode);   /* 0 off, 1 FPS, 2 debug panel (nv2a_pb_d3d11.inc) */
+void nv2a_gpu_set_overlay(int mode);
+void nv2a_gpu_set_frame_limit(int fps);   /* the overlay's target (nv2a_overlay.inc) */   /* 0 off, 1 FPS, 2 debug panel (nv2a_pb_d3d11.inc) */
 int  buffy_movie_active(void);
 
 #define G_APP_WIDESCREEN   0x26D764u       /* XApp +0x34: TV is widescreen */
@@ -43,6 +45,7 @@ static const struct { int w, h; } k_res[] = {
 #define DEFAULT_RES 5                       /* 1920 x 1080 */
 
 static int  s_res = DEFAULT_RES, s_vsync = 1, s_fullscreen;
+static char s_language[16] = "English";   /* [Game] Language */
 static int  s_ws_wide, s_invert_x;      /* [Display] WidescreenWide, [Controls] InvertCameraX */
 static int  s_interp;                   /* [Display] FrameInterpolation */
 static int  s_fps_limit = 60, s_show_fps, s_overlay;   /* [Display] FpsLimit, ShowFps, DebugOverlay */
@@ -69,7 +72,8 @@ void buffy_settings_save(void)
     sprintf_s(v, sizeof v, "%d", k_res[s_res].h);
     WritePrivateProfileStringA("Display", "Height", v, s_path);
     WritePrivateProfileStringA("Display", "VSync", s_vsync ? "1" : "0", s_path);
-    WritePrivateProfileStringA("Display", "Fullscreen", s_fullscreen ? "1" : "0", s_path);
+    sprintf_s(v, sizeof v, "%d", s_fullscreen);
+    WritePrivateProfileStringA("Display", "Fullscreen", v, s_path);
     WritePrivateProfileStringA("Display", "RenderScale", NULL, s_path);   /* old key */
     sprintf_s(v, sizeof v, "%d", s_fps_limit);
     WritePrivateProfileStringA("Display", "FpsLimit", v, s_path);
@@ -79,6 +83,7 @@ void buffy_settings_save(void)
 
 static void apply_overlay(void)
 {
+    nv2a_gpu_set_frame_limit(s_fps_limit);
     nv2a_gpu_set_overlay(s_overlay ? 2 : s_show_fps ? 1 : 0);
 }
 
@@ -88,10 +93,10 @@ static void apply(void)
     apply_overlay();
 }
 
-/* The renderer's Alt+Enter / F11 toggle. */
-static void on_display_key(int fullscreen)
+/* The renderer's Alt+Enter / F11 toggle (the mode it switched to). */
+static void on_display_key(int mode)
 {
-    s_fullscreen = fullscreen;
+    s_fullscreen = mode;
     buffy_settings_save();
 }
 
@@ -120,7 +125,10 @@ void buffy_settings_load(void)
                      (int)GetPrivateProfileIntA("Display", "Height", 0, s_path));
         s_res = i >= 0 ? i : DEFAULT_RES;
         s_vsync = GetPrivateProfileIntA("Display", "VSync", 1, s_path) != 0;
-        s_fullscreen = GetPrivateProfileIntA("Display", "Fullscreen", 0, s_path) != 0;
+        /* 0 windowed, 1 borderless (what 1 has always meant), 2 fullscreen */
+        s_fullscreen = (int)GetPrivateProfileIntA("Display", "Fullscreen", 0, s_path);
+        if (s_fullscreen < 0 || s_fullscreen > 2)
+            s_fullscreen = 1;
         if (i < 0 && !GetPrivateProfileIntA("Display", "Width", 0, s_path) && buffy_on_steam_deck()) {
             /* first run on a Steam Deck: its own screen, 720p */
             s_res = find_res(1280, 720);
@@ -137,6 +145,8 @@ void buffy_settings_load(void)
         /* [Game], set from the launcher's Settings tab. */
         if (GetPrivateProfileIntA("Game", "SkipIntroMovies", 0, s_path) && !getenv("BUFFY_SKIP_INTRO"))
             _putenv("BUFFY_SKIP_INTRO=1");
+        GetPrivateProfileStringA("Game", "Language", "English", s_language, sizeof s_language, s_path);
+        buffy_settings_language_running();     /* the language this start is in */
     }
     {
         /* [Textures], from the launcher's Textures tab: texture packs in
@@ -163,7 +173,7 @@ void buffy_settings_load(void)
     apply();
     fprintf(stderr, "[SETTINGS] %dx%d%s, vsync %s, %s\n", k_res[s_res].w, k_res[s_res].h,
             buffy_settings_widescreen() ? " widescreen" : "", s_vsync ? "on" : "off",
-            s_fullscreen ? "fullscreen" : "windowed");
+            buffy_settings_display_mode_name(s_fullscreen));
 }
 
 int  buffy_settings_res_width(void)  { return k_res[s_res].w; }
@@ -186,9 +196,14 @@ void buffy_settings_set_vsync(int on)
     buffy_settings_save();
 }
 
-void buffy_settings_set_fullscreen(int on)
+const char *buffy_settings_display_mode_name(int mode)
 {
-    s_fullscreen = on != 0;
+    return mode == 2 ? "fullscreen" : mode == 1 ? "borderless" : "windowed";
+}
+
+void buffy_settings_set_fullscreen(int mode)
+{
+    s_fullscreen = mode < 0 || mode > 2 ? 0 : mode;
     apply();
     buffy_settings_save();
 }
@@ -200,6 +215,7 @@ int  buffy_settings_overlay(void)   { return s_overlay; }
 void buffy_settings_set_fps_limit(int fps)
 {
     s_fps_limit = buffy_fps_clamp(fps);
+    apply_overlay();
     buffy_settings_save();
 }
 
@@ -275,4 +291,61 @@ int buffy_settings_widescreen_wide(void)
 int buffy_settings_invert_camera_x(void)
 {
     return s_invert_x;
+}
+
+/* [Game] Language: the language the game's text is in -- the console's own
+ * dashboard setting, which XGetLanguage answers (buffy_crt.c). English,
+ * French, German, Spanish or Italian (the European release's); a number is
+ * taken as an Xbox language code. BUFFY_LANGUAGE overrides (testing). */
+static const struct { const char *name; int code; } k_languages[] = {
+    { "English", 1 }, { "Japanese", 2 }, { "German", 3 }, { "French", 4 }, { "Spanish", 5 },
+    { "Italian", 6 }, { "Korean", 7 }, { "Chinese", 8 }, { "Portuguese", 9 },
+};
+
+int buffy_settings_language_code(void)
+{
+    const char *v = getenv("BUFFY_LANGUAGE");
+    size_t i;
+#if defined(BUFFY_RELEASE_USA)
+    return 1;                                  /* the North American release: English only */
+#endif
+    if (!v || !*v)
+        v = s_language;
+    if (atoi(v) >= 1 && atoi(v) <= 9)
+        return atoi(v);
+    for (i = 0; i < sizeof k_languages / sizeof k_languages[0]; i++)
+        if (!_stricmp(v, k_languages[i].name))
+            return k_languages[i].code;
+    return 1;
+}
+
+/* The PC menu's Language line: the European release's four (Italian is not
+ * on its disc). The game reads the language as it starts, so a change is
+ * saved for the next start. */
+static const char *const k_menu_languages[] = { "English", "French", "German", "Spanish" };
+
+int buffy_settings_language_index(void)
+{
+    int i;
+    for (i = 0; i < 4; i++)
+        if (!_stricmp(s_language, k_menu_languages[i]))
+            return i;
+    return 0;
+}
+
+int buffy_settings_language_running(void)
+{
+    static int at_start = -1;
+    if (at_start < 0)
+        at_start = buffy_settings_language_index();
+    return at_start;
+}
+
+void buffy_settings_step_language(int dir)
+{
+    int i = (buffy_settings_language_index() + (dir < 0 ? 3 : 1)) % 4;
+    buffy_settings_language_running();          /* (what the game started in, kept) */
+    strcpy_s(s_language, sizeof s_language, k_menu_languages[i]);
+    if (s_path[0])
+        WritePrivateProfileStringA("Game", "Language", s_language, s_path);
 }

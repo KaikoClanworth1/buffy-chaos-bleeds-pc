@@ -461,6 +461,8 @@ static void begin_rendering(void)
     ri.pDepthAttachment = st.ds ? &da : NULL;
     ri.pStencilAttachment = st.ds ? &da : NULL;
     vkCmdBeginRendering(cmd(), &ri);
+    if (s_dyn_per_pass)
+        s_dyn.valid = 0;                          /* (Adreno: dynamic state doesn't outlive a render pass) */
     if (s_prof) s_prof_n[PR_PASS]++;
     s_rendering = 1;
     s_pass_rt = st.rt;
@@ -468,6 +470,9 @@ static void begin_rendering(void)
     if (st.rt) st.rt->last_use = s_serial;
     if (st.ds) st.ds->last_use = s_serial;
 }
+
+/* (testing) BUFFY_VK_FULL_PUSH=1: every draw pushes all its descriptors */
+static int s_full_push = -1;
 
 /* 0: nothing to draw with (no pipeline) */
 static int draw_setup(void)
@@ -485,6 +490,17 @@ static int draw_setup(void)
     PROF_BEGIN(4);
 
     /* textures to be sampled: out of rendering, into the read layout */
+    if (getenv("BUFFY_VK_FEEDBACK_LOG")) {
+        /* (testing) draws that sample their own colour/depth target */
+        static unsigned long n_rt, n_ds, n_all;
+        n_all++;
+        for (i = 0; i < 8; i++) {
+            if (st.tex[i] && st.tex[i] == st.rt) n_rt++;
+            if (st.tex[i] && st.tex[i] == st.ds) n_ds++;
+        }
+        if (!(n_all % 20000))
+            fprintf(stderr, "  [VK] feedback: %lu draws, %lu sample the colour target, %lu the depth target\n", n_all, n_rt, n_ds);
+    }
     for (i = 0; i < 8; i++) {
         GpuTexture *t = st.tex[i];
         if (t && t->img && t->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && t != st.rt) {
@@ -580,6 +596,14 @@ static int draw_setup(void)
         const GpuDepthDesc *d = st.dss ? &st.dss->d : NULL;
         GpuCull cull = st.rs ? st.rs->d.cull : GPU_CULL_NONE;
         int v, all = !s_dyn.valid;
+        static int dyn_all = -1, no_cull;
+        if (dyn_all < 0) {
+            /* (testing) BUFFY_VK_DYN_ALL=1: every draw sets all of it; BUFFY_VK_NOCULL=1: nothing culled */
+            dyn_all = getenv("BUFFY_VK_DYN_ALL") != NULL;
+            no_cull = getenv("BUFFY_VK_NOCULL") != NULL;
+        }
+        if (dyn_all) all = 1;
+        if (no_cull) cull = GPU_CULL_NONE;
 #define DYN(field, value, call) do { v = (int)(value); if (all || s_dyn.field != v) { call; s_dyn.field = v; } } while (0)
         DYN(cull, cull == GPU_CULL_FRONT ? VK_CULL_MODE_FRONT_BIT : cull == GPU_CULL_BACK ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE,
             vkCmdSetCullMode(cb, (VkCullModeFlags)v));
@@ -649,10 +673,12 @@ static int draw_setup(void)
         ii[8 + i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         s->last_use = s_serial;
     }
+    if (s_full_push < 0)
+        s_full_push = getenv("BUFFY_VK_FULL_PUSH") && getenv("BUFFY_VK_FULL_PUSH")[0] == '1';
     {
         uint32_t nw = 0;
         for (i = 0; i < 14; i++) {
-            if (s_bound.valid && (i < 2 ? !memcmp(&bi[i], &s_bound.bi[i], sizeof bi[i])
+            if (s_bound.valid && !s_full_push && (i < 2 ? !memcmp(&bi[i], &s_bound.bi[i], sizeof bi[i])
                                         : !memcmp(&ii[i - 2], &s_bound.ii[i - 2], sizeof ii[0])))
                 continue;                                /* (the command buffer has it) */
             memset(&w[nw], 0, sizeof w[nw]);

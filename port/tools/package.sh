@@ -14,6 +14,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT/ShaderCache"
 cp -f "$BIN/Buffy Launcher.exe" "$BIN/buffy_chaos_bleeds.exe" "$OUT/"
 cp -f "$BIN/buffy_chaos_bleeds.pdb" "$OUT/" 2>/dev/null || true
+cp -f "$BIN/buffy_chaos_bleeds_usa.exe" "$BIN/buffy_chaos_bleeds_usa.pdb" "$OUT/" 2>/dev/null || true
 cp -f "$ROOT/port/tools/ReadMe.txt" "$OUT/Read Me.txt"
 # Visual C++ runtime, app-local, for PCs without the redistributable.
 CRT="$(ls -d "/c/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Redist/MSVC/"*/x64/Microsoft.VC142.CRT 2>/dev/null | tail -1)"

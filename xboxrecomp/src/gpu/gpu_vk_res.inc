@@ -16,8 +16,10 @@ static int make_vkbuffer(VkDeviceSize bytes, VkBufferUsageFlags usage, int host,
     bi.usage = usage;
     memset(&ai, 0, sizeof ai);
     ai.usage = VMA_MEMORY_USAGE_AUTO;
-    if (host)
+    if (host) {
         ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        ai.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;   /* (mapped and never flushed: phones have non-coherent types) */
+    }
     if (vmaCreateBuffer(s_vma, &bi, &ai, buf, mem, &inf) != VK_SUCCESS)
         return 0;
     if (map)
@@ -255,6 +257,69 @@ static VkImageView make_view(GpuTexture *t, int attachment)
     return v;
 }
 
+/* ── BC1-3 on the CPU (s_soft_bc): a w x h level to RGBA8 ── */
+
+static void bc_color(const uint8_t *b, uint8_t out[16][4], int bc1)
+{
+    uint32_t c0 = b[0] | b[1] << 8, c1 = b[2] | b[3] << 8;
+    uint32_t bits = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+    uint8_t pal[4][4];
+    int i, k;
+    pal[0][0] = (uint8_t)((c0 >> 11) * 255 / 31); pal[0][1] = (uint8_t)(((c0 >> 5) & 63) * 255 / 63);
+    pal[0][2] = (uint8_t)((c0 & 31) * 255 / 31); pal[0][3] = 255;
+    pal[1][0] = (uint8_t)((c1 >> 11) * 255 / 31); pal[1][1] = (uint8_t)(((c1 >> 5) & 63) * 255 / 63);
+    pal[1][2] = (uint8_t)((c1 & 31) * 255 / 31); pal[1][3] = 255;
+    for (k = 0; k < 3; k++) {
+        if (c0 > c1 || !bc1) {
+            pal[2][k] = (uint8_t)((2 * pal[0][k] + pal[1][k]) / 3);
+            pal[3][k] = (uint8_t)((pal[0][k] + 2 * pal[1][k]) / 3);
+        } else {
+            pal[2][k] = (uint8_t)((pal[0][k] + pal[1][k]) / 2);
+            pal[3][k] = 0;
+        }
+    }
+    pal[2][3] = 255;
+    pal[3][3] = (c0 > c1 || !bc1) ? 255 : 0;
+    for (i = 0; i < 16; i++)
+        memcpy(out[i], pal[(bits >> (i * 2)) & 3], 4);
+}
+
+static void bc_decode(GpuFormat f, const uint8_t *src, uint32_t pitch, uint32_t w, uint32_t h, uint8_t *dst)
+{
+    uint32_t bx, by, bw = (w + 3) / 4, bh = (h + 3) / 4, bb = f == GPU_FMT_BC1 ? 8 : 16;
+    for (by = 0; by < bh; by++)
+        for (bx = 0; bx < bw; bx++) {
+            const uint8_t *b = src + (size_t)by * pitch + (size_t)bx * bb;
+            uint8_t px[16][4];
+            int i;
+            bc_color(f == GPU_FMT_BC1 ? b : b + 8, px, f == GPU_FMT_BC1);
+            if (f == GPU_FMT_BC2) {
+                for (i = 0; i < 16; i++)
+                    px[i][3] = (uint8_t)(((b[i / 2] >> ((i & 1) * 4)) & 15) * 17);
+            } else if (f == GPU_FMT_BC3) {
+                uint8_t a[8];
+                uint64_t ab = 0;
+                int k;
+                a[0] = b[0]; a[1] = b[1];
+                for (k = 0; k < 6; k++)
+                    ab |= (uint64_t)b[2 + k] << (8 * k);
+                if (a[0] > a[1])
+                    for (k = 1; k < 7; k++) a[k + 1] = (uint8_t)(((7 - k) * a[0] + k * a[1]) / 7);
+                else {
+                    for (k = 1; k < 5; k++) a[k + 1] = (uint8_t)(((5 - k) * a[0] + k * a[1]) / 5);
+                    a[6] = 0; a[7] = 255;
+                }
+                for (i = 0; i < 16; i++)
+                    px[i][3] = a[(ab >> (3 * i)) & 7];
+            }
+            for (i = 0; i < 16; i++) {
+                uint32_t x = bx * 4 + (i & 3), y = by * 4 + (i >> 2);
+                if (x < w && y < h)
+                    memcpy(dst + ((size_t)y * w + x) * 4, px[i], 4);
+            }
+        }
+}
+
 /* All the subresources' data into a texture (in `cb`), from staging memory
  * `stage` at `so`. */
 static void record_texture_upload(VkCommandBuffer cb, GpuTexture *t, const GpuSubresource *init, uint8_t *sp, VkBuffer sb, VkDeviceSize so)
@@ -310,6 +375,38 @@ GpuTexture *vk_texture_create(const GpuTextureDesc *desc, const GpuSubresource *
     t->desc = *desc;
     if (!t->desc.mips)
         t->desc.mips = 1;
+    if (s_soft_bc && is_bc(desc->format)) {
+        t->soft_bc = desc->format;
+        t->desc.format = GPU_FMT_RGBA8;
+        desc = &t->desc;
+        if (init) {
+            /* each subresource decoded, then made as an RGBA8 texture */
+            uint32_t faces = (t->desc.flags & GPU_TEX_CUBE) ? 6 : 1, n = faces * t->desc.mips, k;
+            GpuSubresource *dec = (GpuSubresource *)calloc(n, sizeof *dec);
+            GpuTexture *made;
+            for (k = 0; dec && k < n; k++) {
+                uint32_t l = k % t->desc.mips, w = t->desc.width >> l ? t->desc.width >> l : 1,
+                         h = t->desc.height >> l ? t->desc.height >> l : 1;
+                uint8_t *px = (uint8_t *)malloc((size_t)w * h * 4);
+                if (px)
+                    bc_decode(t->soft_bc, (const uint8_t *)init[k].data, init[k].pitch, w, h, px);
+                dec[k].data = px;
+                dec[k].pitch = w * 4;
+            }
+            {
+                GpuTextureDesc d2 = t->desc;
+                GpuFormat bc = t->soft_bc;
+                free(t);
+                made = vk_texture_create(&d2, dec);
+                if (made)
+                    made->soft_bc = bc;
+            }
+            for (k = 0; dec && k < n; k++)
+                free((void *)dec[k].data);
+            free(dec);
+            return made;
+        }
+    }
     t->refs = 1;
     t->fmt = vkfmt(desc->format);
     t->aspect = desc->format == GPU_FMT_D24S8 ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -333,6 +430,7 @@ GpuTexture *vk_texture_create(const GpuTextureDesc *desc, const GpuSubresource *
                 memset(&vai, 0, sizeof vai);
                 vai.usage = VMA_MEMORY_USAGE_AUTO;
                 vai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+                vai.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;   /* (mapped and never flushed: phones have non-coherent types) */
                 if (vmaCreateBuffer(s_vma, &bi, &vai, &t->rb, &t->rb_mem, &inf) != VK_SUCCESS) {
                     free(t);
                     return NULL;
@@ -432,6 +530,20 @@ void vk_texture_desc(const GpuTexture *t, GpuTextureDesc *out)
 
 void vk_texture_update(GpuTexture *t, uint32_t face, uint32_t mip, const void *data, uint32_t pitch)
 {
+    if (t->soft_bc) {
+        /* BC data for a texture kept as RGBA8: decoded first */
+        uint32_t w = t->desc.width >> mip ? t->desc.width >> mip : 1, h = t->desc.height >> mip ? t->desc.height >> mip : 1;
+        uint8_t *px = (uint8_t *)malloc((size_t)w * h * 4);
+        GpuFormat bc = t->soft_bc;
+        if (!px)
+            return;
+        bc_decode(bc, (const uint8_t *)data, pitch, w, h, px);
+        t->soft_bc = 0;
+        vk_texture_update(t, face, mip, px, w * 4);
+        t->soft_bc = bc;
+        free(px);
+        return;
+    }
     uint32_t w = t->desc.width >> mip ? t->desc.width >> mip : 1, h = t->desc.height >> mip ? t->desc.height >> mip : 1;
     uint32_t row, y, rows = is_bc(t->desc.format) ? (h + 3) / 4 : h;
     VkDeviceSize bytes = level_bytes(t->desc.format, w, h, &row), so;

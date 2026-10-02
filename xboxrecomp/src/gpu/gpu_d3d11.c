@@ -14,6 +14,7 @@
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <dxgi1_5.h>                 /* (tearing: IDXGIFactory5) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,7 +41,7 @@ struct GpuLayout { ID3D11InputLayout *il; };
 struct GpuBlendState { ID3D11BlendState *s; };
 struct GpuDepthState { ID3D11DepthStencilState *s; };
 struct GpuRasterState { ID3D11RasterizerState *s; };
-struct GpuSwapchain { IDXGISwapChain *sc; HWND hwnd; GpuTexture *bb; };
+struct GpuSwapchain { IDXGISwapChain *sc; HWND hwnd; GpuTexture *bb; UINT flags; };
 
 static ID3D11Device *s_dev;
 static ID3D11DeviceContext *s_ctx;
@@ -766,6 +767,20 @@ GpuSwapchain *dx_swapchain_create(void *window)
     sd.SampleDesc.Count = 1;
     sd.Windowed = TRUE;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    /* VSync off means tearing: without it a flip-model swap chain is held to
+     * the display's refresh by the compositor (a 60 Hz screen ran a 144 FPS
+     * limit at 60). Where the system offers it (Windows 10 1803 on). */
+    {
+        IDXGIFactory5 *f5 = NULL;
+        BOOL tear = FALSE;
+        if (SUCCEEDED(IDXGIFactory_QueryInterface(s_factory, &IID_IDXGIFactory5, (void **)&f5)) && f5) {
+            if (FAILED(IDXGIFactory5_CheckFeatureSupport(f5, DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tear, sizeof tear)))
+                tear = FALSE;
+            IDXGIFactory5_Release(f5);
+        }
+        s->flags = tear ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+        sd.Flags = s->flags;
+    }
     if (FAILED(IDXGIFactory_CreateSwapChain(s_factory, (IUnknown *)s_dev, &sd, &s->sc))) {
         free(s);
         return NULL;
@@ -793,7 +808,7 @@ GpuTexture *dx_swapchain_begin(GpuSwapchain *s, int resize)
     if (resize) {
         ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
         if (s->bb) { dx_texture_release(s->bb); s->bb = NULL; }
-        IDXGISwapChain_ResizeBuffers(s->sc, 0, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
+        IDXGISwapChain_ResizeBuffers(s->sc, 0, 0, 0, DXGI_FORMAT_UNKNOWN, s->flags);
     }
     if (s->bb)
         return s->bb;                          /* (flip model: buffer 0 is always the one to draw) */
@@ -806,5 +821,6 @@ GpuTexture *dx_swapchain_begin(GpuSwapchain *s, int resize)
 
 void dx_swapchain_present(GpuSwapchain *s, int vsync)
 {
-    IDXGISwapChain_Present(s->sc, vsync ? 1 : 0, 0);
+    IDXGISwapChain_Present(s->sc, vsync ? 1 : 0,
+                           !vsync && (s->flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) ? DXGI_PRESENT_ALLOW_TEARING : 0);
 }

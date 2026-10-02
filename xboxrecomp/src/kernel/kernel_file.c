@@ -135,6 +135,107 @@ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
     return xbox_translate_path(xbox_path, win_path, buf_size);
 }
 
+/* ── the disc's files, kept open ──────────────────────────────────────────
+ *
+ * A title streams from its disc by opening a data file, reading a block and
+ * closing it again -- Buffy opens its 100-270 MB FILELIST.0nn a few times a
+ * second while it plays. On the console that is free. Here each open is the
+ * path translation (a query per mod folder), the open itself, and the close,
+ * and real-time virus scanning can hold either for 100 ms or more: stalls in
+ * play the first time an area or an action's data loads. So a read-only
+ * open of a disc file whose handle was closed is given that handle back
+ * (its position at the start, as a new one's would be), and closing such a
+ * handle keeps it for the next open. One user at a time per handle, so
+ * nothing is shared. RECOMP_NO_FILE_POOL=1 turns it off. */
+#define FILE_POOL 24
+static struct {
+    char xpath[MAX_PATH];
+    HANDLE h;
+    int in_use;
+    DWORD last;
+} s_fpool[FILE_POOL];
+static SRWLOCK s_fpool_lock = SRWLOCK_INIT;
+
+static int fpool_eligible(PXBOX_OBJECT_ATTRIBUTES oa, ACCESS_MASK access, ULONG disp, ULONG opts)
+{
+    const char *p;
+    static int off = -1;
+    if (off < 0) {
+        const char *e = getenv("RECOMP_NO_FILE_POOL");
+        off = e && e[0] == '1';
+    }
+    if (off || !oa || !oa->ObjectName || !oa->ObjectName->Buffer || oa->RootDirectory)
+        return 0;
+    if (disp != XBOX_FILE_OPEN || (opts & XBOX_FILE_DIRECTORY_FILE))
+        return 0;
+    if (access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER))
+        return 0;
+    p = oa->ObjectName->Buffer;
+    if (oa->ObjectName->Length >= MAX_PATH)
+        return 0;
+    /* the disc: D:\ as the title names it, or the device itself */
+    return !_strnicmp(p, "D:\\", 3) || !_strnicmp(p, "\\??\\D:\\", 7) || !_strnicmp(p, "\\Device\\CdRom0\\", 15);
+}
+
+static HANDLE fpool_take(PXBOX_OBJECT_ATTRIBUTES oa)
+{
+    HANDLE h = NULL;
+    int i, n = oa->ObjectName->Length;
+    AcquireSRWLockExclusive(&s_fpool_lock);
+    for (i = 0; i < FILE_POOL; i++)
+        if (s_fpool[i].h && !s_fpool[i].in_use && (int)strlen(s_fpool[i].xpath) == n
+                && !_strnicmp(s_fpool[i].xpath, oa->ObjectName->Buffer, n)) {
+            LARGE_INTEGER zero;
+            zero.QuadPart = 0;
+            SetFilePointerEx(s_fpool[i].h, zero, NULL, FILE_BEGIN);
+            s_fpool[i].in_use = 1;
+            s_fpool[i].last = GetTickCount();
+            h = s_fpool[i].h;
+            break;
+        }
+    ReleaseSRWLockExclusive(&s_fpool_lock);
+    return h;
+}
+
+static void fpool_add(PXBOX_OBJECT_ATTRIBUTES oa, HANDLE h)
+{
+    int i, slot = -1, n = oa->ObjectName->Length;
+    AcquireSRWLockExclusive(&s_fpool_lock);
+    for (i = 0; i < FILE_POOL; i++)
+        if (!s_fpool[i].h) { slot = i; break; }
+    if (slot < 0)                                  /* full: the idle one used longest ago goes */
+        for (i = 0; i < FILE_POOL; i++)
+            if (!s_fpool[i].in_use && (slot < 0 || s_fpool[i].last < s_fpool[slot].last))
+                slot = i;
+    if (slot >= 0) {
+        if (s_fpool[slot].h)
+            CloseHandle(s_fpool[slot].h);
+        memcpy(s_fpool[slot].xpath, oa->ObjectName->Buffer, n);
+        s_fpool[slot].xpath[n] = 0;
+        s_fpool[slot].h = h;
+        s_fpool[slot].in_use = 1;
+        s_fpool[slot].last = GetTickCount();
+    }
+    ReleaseSRWLockExclusive(&s_fpool_lock);
+}
+
+/* Closing a handle: 1 if it is one of the pool's (kept for the next open,
+ * not closed). */
+int xbox_file_pool_release(HANDLE h)
+{
+    int i, kept = 0;
+    AcquireSRWLockExclusive(&s_fpool_lock);
+    for (i = 0; i < FILE_POOL; i++)
+        if (s_fpool[i].h == h && s_fpool[i].in_use) {
+            s_fpool[i].in_use = 0;
+            s_fpool[i].last = GetTickCount();
+            kept = 1;
+            break;
+        }
+    ReleaseSRWLockExclusive(&s_fpool_lock);
+    return kept;
+}
+
 NTSTATUS __stdcall xbox_NtCreateFile(
     PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
@@ -144,10 +245,21 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     WCHAR win_path[MAX_PATH];
     HANDLE h;
     DWORD flags_and_attrs = FILE_ATTRIBUTE_NORMAL;
+    int pooled;
     (void)AllocationSize;
 
     if (!FileHandle || !ObjectAttributes)
         return STATUS_INVALID_PARAMETER;
+
+    pooled = fpool_eligible(ObjectAttributes, DesiredAccess, CreateDisposition, CreateOptions);
+    if (pooled && (h = fpool_take(ObjectAttributes)) != NULL) {
+        *FileHandle = h;
+        if (IoStatusBlock) {
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = 1;             /* FILE_OPENED */
+        }
+        return STATUS_SUCCESS;
+    }
 
     if (!translate_obj_path(ObjectAttributes, win_path, MAX_PATH)) {
         xbox_log(XBOX_LOG_ERROR, XBOX_LOG_FILE, "NtCreateFile: path translation failed");
@@ -234,6 +346,8 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     }
 
     *FileHandle = h;
+    if (pooled && !(CreateOptions & XBOX_FILE_DIRECTORY_FILE))
+        fpool_add(ObjectAttributes, h);
     if (IoStatusBlock) {
         IoStatusBlock->Status = STATUS_SUCCESS;
         IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
@@ -322,7 +436,8 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
 {
     XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
     if (Handle && Handle != INVALID_HANDLE_VALUE) {
-        CloseHandle(Handle);
+        if (!xbox_file_pool_release(Handle))          /* (a disc file's: kept for its next open) */
+            CloseHandle(Handle);
         return STATUS_SUCCESS;
     }
     return STATUS_INVALID_HANDLE;
@@ -1239,6 +1354,14 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     IoStatusBlock->Status = STATUS_SUCCESS;
     IoStatusBlock->Information = header_size + name_len;
     return STATUS_SUCCESS;
+}
+
+
+/* No pool of disc files here: every close is a close. */
+int xbox_file_pool_release(HANDLE h)
+{
+    (void)h;
+    return 0;
 }
 
 #endif /* _WIN32 */

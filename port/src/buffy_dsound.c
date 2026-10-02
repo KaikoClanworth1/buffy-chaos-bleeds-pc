@@ -25,8 +25,12 @@
  */
 #define COBJMACROS
 #include <windows.h>
+#if defined(BUFFY_ANDROID)
+#include <aaudio/AAudio.h>
+#else
 #include <mmsystem.h>
 #include <dsound.h>
+#endif
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,8 +39,10 @@
 
 #include "recomp/gen/recomp_types.h"
 
+#if defined(_MSC_VER)
 #pragma comment(lib, "dsound.lib")
 #pragma comment(lib, "winmm.lib")
+#endif
 
 extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
 
@@ -72,9 +78,11 @@ static float   s_lx, s_ly, s_lz;                   /* listener */
 static float   s_fx = 0, s_fy = 0, s_fz = 1, s_tx = 0, s_ty = 1, s_tz = 0;
 static int     s_started;
 
+#if !defined(BUFFY_ANDROID)
 static LPDIRECTSOUND8        s_ds;
 static LPDIRECTSOUNDBUFFER   s_out;
 static DWORD                 s_out_bytes;
+#endif
 
 static void ret_stdcall(uint32_t result, uint32_t arg_bytes)
 {
@@ -340,6 +348,7 @@ static void mix(int16_t *out, int frames)
     }
 }
 
+#if !defined(BUFFY_ANDROID)
 static DWORD WINAPI mixer_thread(LPVOID unused)
 {
     /* Written relative to DirectSound's own write cursor (the first byte that
@@ -431,6 +440,75 @@ static void audio_start(void)
     CloseHandle(CreateThread(NULL, 0, mixer_thread, NULL, 0, NULL));
     fprintf(stderr, "  [DSOUND] Windows DirectSound output: 48 kHz stereo\n");
 }
+
+#else
+/* Android: an AAudio stream, low latency, that asks for each buffer as it
+ * needs it -- the mixer fills it on AAudio's own thread. */
+static AAudioStream *s_aa;
+static int s_aa_mute;
+
+static aaudio_data_callback_result_t aa_data(AAudioStream *st, void *user, void *data, int32_t frames)
+{
+    (void)st;
+    (void)user;
+    mix((int16_t *)data, frames);
+    if (s_aa_mute)
+        memset(data, 0, (size_t)frames * 4);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+static void aa_error(AAudioStream *st, void *user, aaudio_result_t err)
+{
+    (void)st;
+    (void)user;
+    fprintf(stderr, "  [DSOUND] AAudio stream error %d\n", (int)err);
+}
+
+static void audio_start(void)
+{
+    AAudioStreamBuilder *b = NULL;
+    aaudio_result_t r;
+    if (s_started)
+        return;
+    s_started = 1;
+    InitializeCriticalSection(&s_lock);
+    s_aa_mute = getenv("BUFFY_MUTE") && getenv("BUFFY_MUTE")[0] == '1';
+    if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) {
+        fprintf(stderr, "  [DSOUND] no AAudio; game runs silent\n");
+        return;
+    }
+    AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setChannelCount(b, 2);
+    AAudioStreamBuilder_setSampleRate(b, MIX_RATE);
+    AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setSharingMode(b, AAUDIO_SHARING_MODE_SHARED);
+    AAudioStreamBuilder_setUsage(b, AAUDIO_USAGE_GAME);
+    AAudioStreamBuilder_setContentType(b, AAUDIO_CONTENT_TYPE_MUSIC);
+    AAudioStreamBuilder_setDataCallback(b, aa_data, NULL);
+    AAudioStreamBuilder_setErrorCallback(b, aa_error, NULL);
+    r = AAudioStreamBuilder_openStream(b, &s_aa);
+    AAudioStreamBuilder_delete(b);
+    if (r != AAUDIO_OK) {
+        fprintf(stderr, "  [DSOUND] AAudio stream failed (%d); game runs silent\n", (int)r);
+        s_aa = NULL;
+        return;
+    }
+    AAudioStream_requestStart(s_aa);
+    fprintf(stderr, "  [DSOUND] AAudio output: %d Hz stereo, %d-frame bursts\n",
+            (int)AAudioStream_getSampleRate(s_aa), (int)AAudioStream_getFramesPerBurst(s_aa));
+}
+
+/* the app paused / resumed (android_main.c) */
+void buffy_audio_pause(int paused)
+{
+    if (!s_aa)
+        return;
+    if (paused)
+        AAudioStream_requestPause(s_aa);
+    else
+        AAudioStream_requestStart(s_aa);
+}
+#endif
 
 static uint32_t new_object(uint32_t index)
 {

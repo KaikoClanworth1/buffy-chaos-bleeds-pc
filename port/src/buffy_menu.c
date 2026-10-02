@@ -4,8 +4,9 @@
  *   Options page:  PC Settings -- after Sound Volume: a page of its own
  *                  (the Options page opened again as a popup, its lines
  *                  rewritten by buffy_mods.c) with Resolution, VSync,
- *                  Fullscreen, FPS Limit, Show FPS and Debug Overlay, each
- *                  changed with Left / Right / A.
+ *                  Display (windowed, borderless, fullscreen), FPS Limit,
+ *                  Overlay (off, FPS, debug) and Language, each changed
+ *                  with Left / Right / A.
  *   Main menu:     Exit -- after Extras.
  *
  * The menus are HUD scripts: each line is an XHudScriptButton the script
@@ -112,7 +113,11 @@ static void label_for(int e, wchar_t *out, size_t n)
         swprintf(out, n, L"Resolution  %d x %d", buffy_settings_res_width(), buffy_settings_res_height());
         break;
     case E_VSYNC:      swprintf(out, n, L"VSync  %ls", buffy_settings_vsync() ? L"On" : L"Off"); break;
-    case E_FULLSCREEN: swprintf(out, n, L"Fullscreen  %ls", buffy_settings_fullscreen() ? L"On" : L"Off"); break;
+    case E_FULLSCREEN: {
+        static const wchar_t *const k_modes[3] = { L"Windowed", L"Borderless", L"Fullscreen" };
+        swprintf(out, n, L"Display  %ls", k_modes[buffy_settings_fullscreen() % 3]);
+        break;
+    }
     case E_COOP:       swprintf(out, n, L"Co-op"); break;
     case E_P1CHANGE:   swprintf(out, n, L"Change Character"); break;
     case E_PCSET:      swprintf(out, n, L"PC Settings"); break;
@@ -579,7 +584,7 @@ static void press(int e, uint32_t btn, uint32_t mask)
         buffy_settings_set_vsync(!buffy_settings_vsync());
         break;
     case E_FULLSCREEN:
-        buffy_settings_set_fullscreen(!buffy_settings_fullscreen());
+        buffy_settings_set_fullscreen((buffy_settings_fullscreen() + ((mask & PAD_LEFT) ? 2 : 1)) % 3);
         break;
     case E_EXIT:
         if (!(mask & PAD_A))
@@ -607,8 +612,22 @@ void buffy_pc_line_text(int line, wchar_t *out, size_t n)
     case 1: label_for(E_VSYNC, out, n); break;
     case 2: label_for(E_FULLSCREEN, out, n); break;
     case 3: swprintf(out, n, L"FPS Limit  %d", buffy_settings_fps_limit()); break;
-    case 4: swprintf(out, n, L"Show FPS  %ls", buffy_settings_show_fps() ? L"On" : L"Off"); break;
-    default: swprintf(out, n, L"Debug Overlay  %ls", buffy_settings_overlay() ? L"On" : L"Off"); break;
+    case 4:
+        swprintf(out, n, L"Overlay  %ls", buffy_settings_overlay() ? L"Debug" : buffy_settings_show_fps() ? L"FPS" : L"Off");
+        break;
+    default: {
+        /* the game reads its language as it starts: a change is for the next start */
+        static const wchar_t k_fr[] = { 'F', 'r', 'a', 'n', 0xE7, 'a', 'i', 's', 0 };
+        static const wchar_t k_es[] = { 'E', 's', 'p', 'a', 0xF1, 'o', 'l', 0 };
+        static const wchar_t *const k_names[4] = { L"English", k_fr, L"Deutsch", k_es };
+        int i = buffy_settings_language_index();
+#if defined(BUFFY_RELEASE_USA)
+        swprintf(out, n, L"Language  English (US release)");
+#else
+        swprintf(out, n, L"Language  %ls%ls", k_names[i], i != buffy_settings_language_running() ? L" (on restart)" : L"");
+#endif
+        break;
+    }
     }
 }
 
@@ -624,7 +643,7 @@ int buffy_pc_line_press(uint32_t btn, int line, uint32_t mask, int left, int any
     switch (line) {
     case 0: buffy_settings_step_res(left ? -1 : 1); break;
     case 1: buffy_settings_set_vsync(!buffy_settings_vsync()); break;
-    case 2: buffy_settings_set_fullscreen(!buffy_settings_fullscreen()); break;
+    case 2: buffy_settings_set_fullscreen((buffy_settings_fullscreen() + (left ? 2 : 1)) % 3); break;
     case 3: {
         /* the next listed limit up (Right / A) or down (Left), wrapping */
         static const int k_fps[] = { 30, 60, 90, 120, 144, 165, 240, 360 };
@@ -638,8 +657,19 @@ int buffy_pc_line_press(uint32_t btn, int line, uint32_t mask, int left, int any
         buffy_settings_set_fps_limit(k_fps[i]);
         break;
     }
-    case 4: buffy_settings_set_show_fps(!buffy_settings_show_fps()); break;
-    default: buffy_settings_set_overlay(!buffy_settings_overlay()); break;
+    case 4: {
+        /* off -> FPS -> debug panel -> off (Left goes back) */
+        int cur = buffy_settings_overlay() ? 2 : buffy_settings_show_fps() ? 1 : 0;
+        cur = (cur + (left ? 2 : 1)) % 3;
+        buffy_settings_set_overlay(cur == 2);
+        buffy_settings_set_show_fps(cur == 1);
+        break;
+    }
+    default:
+#if !defined(BUFFY_RELEASE_USA)
+        buffy_settings_step_language(left ? -1 : 1);
+#endif
+        break;
     }
     (void)mask;
     call_cdecl1(XPlaySound_00091780, 0x1A00013Du);
@@ -759,6 +789,7 @@ void XHudScriptButton_Draw_00047DC0(void)
     XHudScriptButton_Draw_00047DC0_orig();
 }
 
+#if defined(_WIN32) /* guard */
 /* ── debugging: BUFFY_MENU_WATCH=1 puts a hardware write watchpoint on the
  * pressed line's window flags (+0x1A8) and names every function that writes
  * them afterwards. ─────────────────────────────────────────────────────── */
@@ -822,6 +853,9 @@ void buffy_menu_watch(uint32_t guest_va)
     CloseHandle(t);
     fprintf(stderr, "[WATCH] armed on %08X\n", guest_va);
 }
+#else
+void buffy_menu_watch(uint32_t guest_va) { (void)guest_va; }
+#endif
 
 /* void XHudScriptWnd::SetScript(uint32_t script, uint32_t file) -- wrapped: the
  * page a script window shows (a script in the given geometry file). The

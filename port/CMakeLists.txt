@@ -13,7 +13,7 @@ project(buffy_chaos_bleeds C CXX)
 # The release version: the launcher compares it with the newest release on
 # GitHub (its updater), and tools/package.sh names the zip after it. Raise it
 # for each release, matching the release tag (v0.3.0).
-set(BUFFY_VERSION "0.4.1")
+set(BUFFY_VERSION "1.0.0")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -54,6 +54,7 @@ set(GAME_SOURCES
     src/recomp_manual.c
     src/buffy_crt.c
     src/buffy_d3dx.c
+    src/buffy_xbecheck.c
     src/buffy_dsound.c
     src/buffy_input.c
     src/buffy_movie.c
@@ -94,6 +95,52 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11 dxgi dxguid xinput winmm dbghelp
     xbox_kernel
 )
+
+# -- The North American release: buffy_chaos_bleeds_usa.exe ---------------------
+# The same port for the other release's default.xbe (tools/regen_usa.sh writes
+# src/recomp/gen_usa and the address map). The port's source names the
+# European release's addresses; translate_release.py turns them into this
+# release's at build time, so both executables come from one source.
+# buffy_chaos_bleeds.exe starts this one when the installed game is that release.
+set(BUFFY_USA_WORK "${CMAKE_CURRENT_SOURCE_DIR}/../game_files_usa/work" CACHE PATH
+    "game_files_usa/work: the North American release's address map (tools/regen_usa.sh)")
+file(GLOB RECOMP_GEN_USA_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/recomp/gen_usa/recomp_*.c
+)
+if(RECOMP_GEN_USA_SOURCES AND EXISTS "${BUFFY_USA_WORK}/addrmap.json")
+    set(USA_SRC_DIR "${CMAKE_BINARY_DIR}/src_usa")
+    file(GLOB PORT_SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/*.json)
+    set(USA_SOURCES "")
+    foreach(f ${GAME_SOURCES})
+        get_filename_component(n ${f} NAME)
+        list(APPEND USA_SOURCES "${USA_SRC_DIR}/${n}")
+    endforeach()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_custom_command(
+        OUTPUT ${USA_SOURCES}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/translate_release.py
+                "${BUFFY_USA_WORK}/addrmap.json" ${CMAKE_CURRENT_SOURCE_DIR}/src ${USA_SRC_DIR}
+                ${CMAKE_BINARY_DIR}/translate_usa_report.txt
+        DEPENDS ${PORT_SRC_FILES} "${BUFFY_USA_WORK}/addrmap.json" ${CMAKE_CURRENT_SOURCE_DIR}/tools/translate_release.py
+        COMMENT "The port's source for the North American release"
+    )
+    add_executable(buffy_chaos_bleeds_usa WIN32 ${USA_SOURCES} ${RECOMP_GEN_USA_SOURCES})
+    target_include_directories(buffy_chaos_bleeds_usa PRIVATE
+        ${USA_SRC_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/recomp
+        ${XBOXRECOMP_DIR}/include
+    )
+    target_compile_definitions(buffy_chaos_bleeds_usa PRIVATE BUFFY_RELEASE_USA=1)
+    if(MSVC)
+        target_compile_options(buffy_chaos_bleeds_usa PRIVATE /bigobj)
+    endif()
+    target_link_libraries(buffy_chaos_bleeds_usa PRIVATE
+        d3d11 dxgi dxguid xinput winmm dbghelp
+        xbox_kernel
+    )
+endif()
 
 # -- Launcher ("Buffy Launcher.exe"): install from the disc image, settings, mods
 add_executable(buffy_launcher WIN32 launcher/buffy_launcher.c launcher/unzip.c src/buffy_savefmt.c)

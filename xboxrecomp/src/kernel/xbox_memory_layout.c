@@ -377,6 +377,7 @@ static void ac97_clear_reset_bits(void)
 
 static LONG CALLBACK ac97_write_veh(PEXCEPTION_POINTERS ep)
 {
+#if defined(_WIN32) /* guard */
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     DWORD old;
 
@@ -411,6 +412,10 @@ static LONG CALLBACK ac97_write_veh(PEXCEPTION_POINTERS ep)
         }
     }
     return EXCEPTION_CONTINUE_SEARCH;
+#else
+    (void)ep;
+    return EXCEPTION_CONTINUE_SEARCH;
+#endif
 }
 
 /* Arm the trap. Called once the MCPX aperture exists, and only alongside the
@@ -1068,6 +1073,7 @@ static void nv2a_w1c_protect(int i, DWORD prot)
 
 static LONG CALLBACK nv2a_w1c_veh(PEXCEPTION_POINTERS ep)
 {
+#if defined(_WIN32) /* guard */
     PEXCEPTION_RECORD er = ep->ExceptionRecord;
     int i;
 
@@ -1102,6 +1108,10 @@ static LONG CALLBACK nv2a_w1c_veh(PEXCEPTION_POINTERS ep)
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     return EXCEPTION_CONTINUE_SEARCH;
+#else
+    (void)ep;
+    return EXCEPTION_CONTINUE_SEARCH;
+#endif
 }
 
 /* Raw store to PCRTC_INTR_0 for the runtime's own vblank delivery. */
@@ -1495,6 +1505,7 @@ static void watchdog_report(FILE *out, const char *why)
      * stack showing whatever returned last; the host RIP names the generated
      * function -- and so the guest function -- that is executing. Sampled a
      * few times so a loop spanning several functions shows all of them. */
+#if defined(_WIN32) /* guard */
     if (s_watchdog_thread) {
         int k;
         for (k = 0; k < 12; k++) {
@@ -1562,6 +1573,7 @@ static void watchdog_report(FILE *out, const char *why)
             }
         }
     }
+#endif
 
     /* RECOMP_DUMP_RANGE=0xVA:0xLEN:path -- raw guest memory at the hang, for
      * offline decoding (pushbuffers, structures). */
@@ -1584,6 +1596,7 @@ static void watchdog_report(FILE *out, const char *why)
 
     /* Every other thread once: timer/DPC, audio, guest worker threads. A stall
      * that crosses threads (a DPC blocked, a worker waiting) shows up here. */
+#if defined(_WIN32) /* guard */
     {
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         THREADENTRY32 te;
@@ -1621,6 +1634,7 @@ static void watchdog_report(FILE *out, const char *why)
         if (snap != INVALID_HANDLE_VALUE)
             CloseHandle(snap);
     }
+#endif
 
     for (i = 0; i < 400 && esp; i++) {
         uint32_t a = esp + i * 4;
@@ -1698,6 +1712,7 @@ static DWORD WINAPI xbox_hang_monitor_thread(LPVOID arg)
  * symbol). A cheap stand-in for a profiler when chasing frame time. */
 static DWORD WINAPI xbox_profile_thread(LPVOID arg)
 {
+#if defined(_WIN32) /* guard */
     const char *spec = (const char *)arg;
     unsigned start = (unsigned)atoi(spec), secs = strchr(spec, ':') ? (unsigned)atoi(strchr(spec, ':') + 1) : 10;
     enum { NSYM = 4096 };
@@ -1745,6 +1760,10 @@ static DWORD WINAPI xbox_profile_thread(LPVOID arg)
     }
     fflush(stderr);
     return 0;
+#else
+    (void)arg;
+    return 0;
+#endif
 }
 
 void xbox_WatchdogStart(void)

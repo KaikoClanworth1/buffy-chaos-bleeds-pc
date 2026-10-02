@@ -558,6 +558,83 @@ static void strip_trailing_slash(char* s)
         s[len - 1] = '\0';
 }
 
+/* Xbox names are case-insensitive, POSIX ones are not: the game asks for
+ * BUFFY\BINARY\... and the disc's folder is Buffy/Binary. Each part of a
+ * path that does not exist as written is looked up in its folder ignoring
+ * case; the rest (a file about to be made) stays as written. The last few
+ * hundred answers are remembered, since the same files open again and
+ * again. Returns 1 when the path (as fixed) exists. */
+#include <dirent.h>
+#include <pthread.h>
+#include <sys/stat.h>
+
+#define CASE_CACHE 512
+static struct { uint32_t hash; char *from, *to; } s_case_cache[CASE_CACHE];
+static pthread_mutex_t s_case_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t case_hash(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s)
+        h = (h ^ (uint8_t)*s++) * 16777619u;
+    return h;
+}
+
+int xbox_path_fix_case(char *path, size_t size)
+{
+    struct stat st;
+    char out[1024], *part, *save = NULL, work[1024];
+    uint32_t h;
+    int slot, exists = 1;
+    if (!path || !*path || stat(path, &st) == 0)
+        return path && *path;
+    h = case_hash(path);
+    slot = (int)(h % CASE_CACHE);
+    pthread_mutex_lock(&s_case_lock);
+    if (s_case_cache[slot].from && s_case_cache[slot].hash == h && !strcmp(s_case_cache[slot].from, path)) {
+        snprintf(path, size, "%s", s_case_cache[slot].to);
+        pthread_mutex_unlock(&s_case_lock);
+        return 1;
+    }
+    pthread_mutex_unlock(&s_case_lock);
+    snprintf(work, sizeof work, "%s", path);
+    out[0] = 0;
+    if (work[0] == '/')
+        snprintf(out, sizeof out, "/");
+    for (part = strtok_r(work, "/", &save); part; part = strtok_r(NULL, "/", &save)) {
+        char cand[1024];
+        size_t n = strlen(out);
+        snprintf(cand, sizeof cand, "%s%s%s", out, (n && out[n - 1] != '/') ? "/" : "", part);
+        if (exists && stat(cand, &st) != 0) {
+            DIR *d = opendir(n ? out : ".");
+            struct dirent *e;
+            int found = 0;
+            while (d && (e = readdir(d)) != NULL)
+                if (!strcasecmp(e->d_name, part)) {
+                    snprintf(cand, sizeof cand, "%s%s%s", out, (n && out[n - 1] != '/') ? "/" : "", e->d_name);
+                    found = 1;
+                    break;
+                }
+            if (d)
+                closedir(d);
+            if (!found)
+                exists = 0;                       /* from here on, as written */
+        }
+        snprintf(out, sizeof out, "%s", cand);
+    }
+    if (exists) {
+        pthread_mutex_lock(&s_case_lock);
+        free(s_case_cache[slot].from);
+        free(s_case_cache[slot].to);
+        s_case_cache[slot].hash = h;
+        s_case_cache[slot].from = strdup(path);
+        s_case_cache[slot].to = strdup(out);
+        pthread_mutex_unlock(&s_case_lock);
+    }
+    snprintf(path, size, "%s", out);
+    return exists;
+}
+
 /* Recursively create a directory and all missing parents. */
 static void mkdir_p(const char* path)
 {
@@ -605,12 +682,53 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
         }
     }
 
+    /* (a caller's Windows-style separators) */
+    for (char *p = s_game_dir; *p; p++) if (*p == '\\') *p = '/';
+    for (char *p = s_save_dir; *p; p++) if (*p == '\\') *p = '/';
     strip_trailing_slash(s_game_dir);
     strip_trailing_slash(s_save_dir);
 
     s_initialized = TRUE;
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_PATH, "Path init: game=%s, save=%s",
              s_game_dir, s_save_dir);
+}
+
+/* As the Windows half has them: a title's own U:\ files (a mapper the game
+ * gives, answering with a Windows-style path), the hard disk's folder, and
+ * mod folders laid over the game folder. */
+static BOOL (*s_user_mapper)(const char *rest, WCHAR *out, DWORD n);
+static char s_hdd_dir[MAX_PATH];
+#define XBOX_MAX_OVERLAYS 32
+static char s_overlay[XBOX_MAX_OVERLAYS][MAX_PATH];
+static int  s_overlay_count;
+
+void xbox_path_set_user_mapper(BOOL (*mapper)(const char *rest, WCHAR *out, DWORD n))
+{
+    s_user_mapper = mapper;
+}
+
+static void posix_from_windows(char *s)
+{
+    for (; *s; s++)
+        if (*s == '\\')
+            *s = '/';
+}
+
+void xbox_path_set_hdd_dir(const char *dir)
+{
+    snprintf(s_hdd_dir, sizeof s_hdd_dir, "%s", dir ? dir : "");
+    posix_from_windows(s_hdd_dir);
+    strip_trailing_slash(s_hdd_dir);
+}
+
+void xbox_path_add_overlay(const wchar_t *dir)
+{
+    if (s_overlay_count < XBOX_MAX_OVERLAYS && dir && *dir) {
+        WideCharToMultiByte(CP_UTF8, 0, (LPCWSTR)dir, -1, s_overlay[s_overlay_count], MAX_PATH, NULL, NULL);
+        posix_from_windows(s_overlay[s_overlay_count]);
+        strip_trailing_slash(s_overlay[s_overlay_count]);
+        s_overlay_count++;
+    }
 }
 
 BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
@@ -626,6 +744,19 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
     if (!s_initialized)
         xbox_path_init(NULL, NULL);
 
+    if (s_user_mapper) {
+        int u = match_prefix(xbox_path, "U:\\");
+        WCHAR w[MAX_PATH];
+        if (!u)
+            u = match_prefix(xbox_path, "\\??\\U:\\");
+        if (u && s_user_mapper(xbox_path + u, w, MAX_PATH)) {
+            WideCharToMultiByte(CP_UTF8, 0, w, -1, host_path_buf, (int)buf_size, NULL, NULL);
+            posix_from_windows(host_path_buf);
+            xbox_path_fix_case(host_path_buf, buf_size);
+            return TRUE;
+        }
+    }
+
     {
         char linked[512];
         if (resolve_symlink(xbox_path, linked, sizeof(linked)))
@@ -638,6 +769,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
             remainder = xbox_path + skip;
             base_dir  = s_rules[i].to_save ? s_save_dir : s_game_dir;
             sub_dir   = s_rules[i].sub_posix;
+            if (s_hdd_dir[0] && !s_rules[i].to_save
+                    && !strcmp(s_rules[i].prefix, "\\Device\\Harddisk0\\Partition1\\"))
+                base_dir = s_hdd_dir;
             goto translate;
         }
     }
@@ -668,6 +802,20 @@ translate:
             mkdir_p(dir_path);
         } else {
             snprintf(host_path_buf, buf_size, "%s/%s", base_dir, remainder_posix);
+            if (base_dir == s_hdd_dir)
+                mkdir_p(s_hdd_dir);                       /* (made on use) */
+            if (base_dir == s_game_dir && remainder_posix[0]) {
+                int k;
+                for (k = s_overlay_count - 1; k >= 0; k--) {
+                    char alt[MAX_PATH];
+                    snprintf(alt, sizeof alt, "%s/%s", s_overlay[k], remainder_posix);
+                    if (xbox_path_fix_case(alt, sizeof alt)) {
+                        fprintf(stderr, "  [PATH]   from mod: %s\n", alt);
+                        snprintf(host_path_buf, buf_size, "%s", alt);
+                        break;
+                    }
+                }
+            }
         }
 
         {
@@ -675,6 +823,7 @@ translate:
             while (n > 1 && host_path_buf[n - 1] == '/')
                 host_path_buf[--n] = '\0';
         }
+        xbox_path_fix_case(host_path_buf, buf_size);
 
         XBOX_TRACE(XBOX_LOG_PATH, "%s -> %s", xbox_path, host_path_buf);
         return TRUE;

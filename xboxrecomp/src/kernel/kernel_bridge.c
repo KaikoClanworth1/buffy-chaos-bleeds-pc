@@ -606,7 +606,8 @@ static void bridge_NtClose(void)
     /* Close real handles but skip fake/synthetic ones */
     if (raw_handle && raw_handle != 0xDEAD0001u && raw_handle != 0xBEEF0010u) {
         HANDLE h = bridge_take_handle(raw_handle);
-        if (h && h != INVALID_HANDLE_VALUE)
+        int xbox_file_pool_release(HANDLE h);
+        if (h && h != INVALID_HANDLE_VALUE && !xbox_file_pool_release(h))   /* (kernel_file.c) */
             CloseHandle(h);
     }
     g_eax = 0; /* STATUS_SUCCESS */

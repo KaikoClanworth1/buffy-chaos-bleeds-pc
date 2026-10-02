@@ -286,8 +286,12 @@ static int psh_generate(const PsKey *k, char *out, int cap)
     b.p = out; b.n = 0; b.cap = cap;
     out[0] = 0;
     sb_add(&b, "%s", s_psh_head);
-    sb_add(&b, "float4 ps(P i, out float pdepth : SV_Depth) : SV_Target {\n");
-    sb_add(&b, "  pdepth = i.fog.z > 0.5 ? i.fog.y : i.p.z;\n");    /* (W-buffering: nv2a_pb_vsh.inc) */
+    if (getenv("BUFFY_NO_SV_DEPTH")) {
+        sb_add(&b, "float4 ps(P i) : SV_Target {\n");          /* (testing: no per-pixel depth) */
+    } else {
+        sb_add(&b, "float4 ps(P i, out float pdepth : SV_Depth) : SV_Target {\n");
+        sb_add(&b, "  pdepth = i.fog.z > 0.5 ? i.fog.y : i.p.z;\n");    /* (W-buffering: nv2a_pb_vsh.inc) */
+    }
     sb_add(&b, "  float4 zr = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0;\n");
     sb_add(&b, "  float4 v0 = i.c0, v1 = i.c1;\n");
     sb_add(&b, "  float4 fogr = float4(fogc.rgb, saturate(i.fog.x));\n");
@@ -530,9 +534,28 @@ static void tx_decode_level(uint32_t fmt, const uint8_t *base, uint32_t w, uint3
         return;
     }
     if (tx_swizzled(fmt)) {
-        for (y = 0; y < h; y++)
-            for (x = 0; x < w; x++)
-                px[y * w + x] = tx_texel(fmt, base + (size_t)swizzle_offset(x, y, w, h) * bpp, pal);
+        /* Walking the swizzled layout by masked increments (as
+         * xbox_unswizzle_rect does) instead of computing each texel's offset:
+         * a 512x512 texture went from 18 ms to under 2 -- built the first time
+         * it is drawn, so a hitch in play. */
+        uint32_t mask_x, mask_y, off_y = 0;
+        xbox_swizzle_masks(w, h, &mask_x, &mask_y);
+        for (y = 0; y < h; y++) {
+            uint32_t off_x = 0, *row = px + (size_t)y * w;
+            if (fmt == 0x06 || fmt == 0x12) {              /* A8R8G8B8: as it is */
+                const uint32_t *s32 = (const uint32_t *)base;
+                for (x = 0; x < w; x++) {
+                    row[x] = s32[off_y + off_x];
+                    off_x = (off_x - mask_x) & mask_x;
+                }
+            } else {
+                for (x = 0; x < w; x++) {
+                    row[x] = tx_texel(fmt, base + (size_t)(off_y + off_x) * bpp, pal);
+                    off_x = (off_x - mask_x) & mask_x;
+                }
+            }
+            off_y = (off_y - mask_y) & mask_y;
+        }
     } else {
         if (!pitch) pitch = w * bpp;
         for (y = 0; y < h; y++)

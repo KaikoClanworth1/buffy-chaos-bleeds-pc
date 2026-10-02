@@ -144,6 +144,9 @@ static const char *k_path_name[PATH_COUNT] = { "indexed", "up", "begin/end", "pu
 static int s_mode = -1;                     /* 1 once the device is up */
 static int s_log = -1;
 static long s_frame;
+static uint32_t g_draw_sig = 2166136261u, g_draw_sig_n;   /* (BUFFY_NATIVE_DRAWS_T) */
+static int g_draw_sig_on;
+static long g_frame_draw;                   /* this frame's draws so far (BUFFY_DRAW_SKIP) */
 static unsigned s_count[PATH_COUNT], s_prims;
 static long s_detail_frame = -1;            /* the frame logged draw by draw */
 
@@ -171,9 +174,10 @@ int buffy_native_mode(void)
             ExitProcess(1);
         }
         {
-            void nv2a_native_const_pool(void);
+            void nv2a_native_const_pool(void), nv2a_native_prewarm(void);
             nv2a_native_const_pool();
             fprintf(stderr, "[NATIVE] native renderer\n");
+            nv2a_native_prewarm();        /* the shaders earlier runs used, before the first frame */
         }
         s_mode = 1;
     }
@@ -213,6 +217,24 @@ static void capture(int path, uint32_t prim, uint32_t count, uint32_t data, uint
     s_count[path]++;
     if (path <= PATH_BEGIN)
         s_prims += count;
+    {
+        /* (testing) BUFFY_NATIVE_DRAWS_T=<sec>: every draw for two seconds
+         * from then (seconds as BUFFY_SHOTS_FROM counts them), with the
+         * frame number the screenshot log gives */
+        static int t = -2;
+        uint32_t nv2a_gpu_frame_no(void), nv2a_gpu_seconds(void);
+        if (t == -2)
+            t = nenv("BUFFY_NATIVE_DRAWS_T") ? atoi(nenv("BUFFY_NATIVE_DRAWS_T")) : -1;
+        if (t >= 0 && dev && nv2a_gpu_seconds() >= (uint32_t)t && nv2a_gpu_seconds() < (uint32_t)t + 3) {
+            uint32_t v[6], k;
+            v[0] = (uint32_t)path; v[1] = prim; v[2] = count; v[3] = MEM32(dev + DEV_VSHADER);
+            v[4] = MEM32(dev + DEV_TEXTURES); v[5] = MEM32(dev + DEV_TEXTURES + 4);
+            for (k = 0; k < 6; k++)
+                g_draw_sig = (g_draw_sig ^ v[k]) * 16777619u;
+            g_draw_sig_n++;
+            g_draw_sig_on = 1;
+        }
+    }
     if (!log_on() || s_frame != s_detail_frame || !dev)
         return;
     fprintf(stderr, "[NATIVE] f%ld %s prim %u count %u", s_frame, k_path_name[path], prim, count);
@@ -284,8 +306,16 @@ void buffy_native_frame(void)
         extern double g_native_draw_ms;
         g_native_draw_ms = 0;
     }
+    if (g_draw_sig_on) {
+        uint32_t nv2a_gpu_frame_no(void);
+        fprintf(stderr, "[DRAWS] g%u rt %u clr %u n%u sig %08X\n", nv2a_gpu_frame_no(), s_count[PATH_RT], s_count[PATH_CLEAR], g_draw_sig_n, g_draw_sig);
+        g_draw_sig = 2166136261u;
+        g_draw_sig_n = 0;
+        g_draw_sig_on = 0;
+    }
     memset(s_count, 0, sizeof s_count);
     s_prims = 0;
+    g_frame_draw = 0;
     s_frame++;
 }
 
@@ -603,6 +633,52 @@ static void native_draw(uint32_t prim, uint32_t count, uint32_t index_va, uint32
         /* (BUFFY_NATIVE_FRAMELOG: the draws' own time a frame) */
         extern double g_native_draw_ms;
         LARGE_INTEGER a, b, f;
+        /* (testing) BUFFY_DRAW_SKIP=<first>:<last>: those draws of every frame
+         * (counted from 0 in the frame's order) are not drawn */
+        static long skip_a = -2, skip_b;
+        if (skip_a == -2) {
+            const char *e = nenv("BUFFY_DRAW_SKIP");
+            skip_a = e ? atol(e) : -1;
+            skip_b = e && strchr(e, ':') ? atol(strchr(e, ':') + 1) : skip_a;
+        }
+        {
+            /* (testing) BUFFY_DRAW_LOGR=<first>:<last>: those draws of every
+             * frame logged, by frame and index */
+            static long lr_a = -2, lr_b;
+            if (lr_a == -2) {
+                const char *e = nenv("BUFFY_DRAW_LOGR");
+                lr_a = e ? atol(e) : -1;
+                lr_b = e && strchr(e, ':') ? atol(strchr(e, ':') + 1) : lr_a;
+            }
+            if (lr_a >= 0 && g_frame_draw >= lr_a && g_frame_draw <= lr_b) {
+                const uint32_t *r = (const uint32_t *)XBOX_PTR(D3D_RENDER_STATE);
+                uint32_t nv2a_gpu_frame_no(void);
+                int k;
+                fprintf(stderr, "[DR] g%u #%ld prim %u n %u vs %08X ps %08X", nv2a_gpu_frame_no(), g_frame_draw, prim, count,
+                        vs, MEM32(dev + DEV_PSHADER));
+                fprintf(stderr, " pxs %d vp %u", d.pixel_shader, d.vp_start);
+                for (k = 0; k < 4; k++)
+                    if (d.tex[k].res)
+                        fprintf(stderr, " T%d=%08X/%08X", k, d.tex[k].res, d.tex[k].format);
+                fprintf(stderr, " A");
+                for (k = 0; k < 16; k++)
+                    if (d.attr[k].fmt)
+                        fprintf(stderr, " %d:%X/%u", k, d.attr[k].fmt, d.attr[k].stride);
+                fprintf(stderr, " | rs");
+                for (k = 48; k < 72; k++)
+                    fprintf(stderr, " %X", r[k]);
+                fprintf(stderr, "\n");
+            }
+        }
+        if (nenv("BUFFY_DRAW_SKIPBLEND") && ((const uint32_t *)XBOX_PTR(D3D_RENDER_STATE))[59]) {
+            g_frame_draw++;                     /* (testing) blended draws not drawn */
+            return;
+        }
+        if (skip_a >= 0 && g_frame_draw >= skip_a && g_frame_draw <= skip_b) {
+            g_frame_draw++;
+            return;
+        }
+        g_frame_draw++;
         QueryPerformanceCounter(&a);
         nv2a_native_draw(&d, tg.rt, tg.ds, tg.pw, tg.ph, tg.sw, tg.sh);
         QueryPerformanceCounter(&b);
@@ -1015,4 +1091,58 @@ void D3DDevice_SetRenderTarget_001387A0(void)
                     sf, MEM32(sf), MEM32(sf + 4), MEM32(sf + 0xC), MEM32(sf + 0x10), MEM32(sf + 0x14), z, s_backbuffer);
     }
     D3DDevice_SetRenderTarget_001387A0_orig();
+}
+
+
+/* (testing) BUFFY_PORTAL_LOG=<frame>: each portal test the map's visibility
+ * walk makes in that frame -- the portal, its corners projected, the result. */
+void EXSubMapInfoTable_CheckPortalToView_000EBFE0_orig(void);
+void EXSubMapInfoTable_CheckPortalToView_000EBFE0(void)
+{
+    static long want = -2;
+    uint32_t portal = MEM32(g_esp + 4), vin = MEM32(g_esp + 12), vout = MEM32(g_esp + 16);
+    if (want == -2)
+        want = nenv("BUFFY_PORTAL_LOG") ? atol(nenv("BUFFY_PORTAL_LOG")) : -1;
+    EXSubMapInfoTable_CheckPortalToView_000EBFE0_orig();
+    if (want >= 0 && s_frame == want)
+        fprintf(stderr, "[PORTAL] f%ld p%08X c%08X in %.2f %.2f %.2f %.2f -> %u out %.2f %.2f %.2f %.2f\n", s_frame,
+                portal, MEM32(portal + 0xC), MEMF(vin), MEMF(vin + 4), MEMF(vin + 8), MEMF(vin + 12), g_eax,
+                MEMF(vout), MEMF(vout + 4), MEMF(vout + 8), MEMF(vout + 12));
+}
+
+/* (testing) BUFFY_CULL_LOG=<first>:<last>: in those frames, the camera matrix
+ * at each frame's first CullBox (f<frame> M ...), and with
+ * BUFFY_CULL_EACH=1 every call's box and answer. */
+void EXBaseDisplay_CullBox_000D7430_orig(void);
+void EXBaseDisplay_CullBox_000D7430(void)
+{
+    static long from = -2, to, last = -1;
+    static int each;
+    uint32_t box = MEM32(g_esp + 4);
+    int i, on;
+    if (from == -2) {
+        const char *e = nenv("BUFFY_CULL_LOG");
+        from = e ? atol(e) : -1;
+        to = e && strchr(e, ':') ? atol(strchr(e, ':') + 1) : from;
+        each = nenv("BUFFY_CULL_EACH") != NULL;
+    }
+    on = from >= 0 && s_frame >= from && s_frame <= to;
+    if (on && last != s_frame) {
+        last = s_frame;
+        fprintf(stderr, "[CULLM] f%ld", s_frame);
+        for (i = 0; i < 16; i++)
+            fprintf(stderr, " %.6f", MEMF(0x26EF18 + i * 4));
+        fputc(10, stderr);
+    }
+    EXBaseDisplay_CullBox_000D7430_orig();
+    if (on && each) {
+        /* the box and the matrix the call read, bit-exact */
+        fprintf(stderr, "[CULL] f%ld", s_frame);
+        for (i = 0; i < 8; i++)
+            fprintf(stderr, " %08X", MEM32(box + i * 4));
+        fprintf(stderr, " |");
+        for (i = 0; i < 16; i++)
+            fprintf(stderr, " %08X", MEM32(0x26EF18 + i * 4));
+        fprintf(stderr, " -> %d\n", (int)g_eax);
+    }
 }

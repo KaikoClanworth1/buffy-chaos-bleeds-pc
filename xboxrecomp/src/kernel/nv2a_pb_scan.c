@@ -21,9 +21,7 @@
  * method = w & 0x1FFC.
  */
 #include <stdio.h>
-#if defined(_WIN32)
-#include <windows.h>  /* GetTickCount: slow-method timing */
-#endif
+#include "platform/xbox_winnt.h"  /* GetTickCount: slow-method timing */
 #include <stdint.h>
 #include <stddef.h>   /* ptrdiff_t */
 #include <stdlib.h>
@@ -524,4 +522,8 @@ int nv2a_pb_fifo_start(void *nv2a_regs)
     fprintf(stderr, "  NV2A FIFO puller: executing the pushbuffer on its own thread\n");
     return 1;
 }
+#endif
+
+#if !defined(_WIN32)
+HANDLE g_pb_fifo_thread;                     /* (no pushbuffer thread off Windows) */
 #endif

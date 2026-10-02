@@ -154,6 +154,7 @@ extern void mainCRTStartup_001287F6(void);
  */
 static void print_guest_context(void *rip)
 {
+#if defined(_WIN32) /* guard */
     /* SYMBOL_INFO is variable-length: the name is written past the struct, so
      * it must be over-allocated with MaxNameLen set to the slack. */
     char buf[sizeof(SYMBOL_INFO) + 256];
@@ -180,6 +181,9 @@ static void print_guest_context(void *rip)
             }
         }
     }
+#else
+    (void)rip;
+#endif
 }
 
 /* ── Write watchpoint (BUFFY_WATCH=0xVA) ─────────────────────────
@@ -212,6 +216,7 @@ static void print_guest_context(void *rip);
 
 static LONG watch_handle(PEXCEPTION_POINTERS ep)
 {
+#if defined(_WIN32) /* guard */
     PEXCEPTION_RECORD er = ep->ExceptionRecord;
 
     if (!g_watch_page)
@@ -236,6 +241,10 @@ static LONG watch_handle(PEXCEPTION_POINTERS ep)
         }
     }
     return EXCEPTION_CONTINUE_SEARCH;
+#else
+    (void)ep;
+    return EXCEPTION_CONTINUE_SEARCH;
+#endif
 }
 
 /* Hex-dump guest memory around every register that points into mapped RAM.
@@ -272,6 +281,7 @@ int  xbox_VideoIsPlaying(void) { return 0; }
 
 static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 {
+#if defined(_WIN32) /* guard */
     {
         LONG w = watch_handle(ep);
         if (w != EXCEPTION_CONTINUE_SEARCH)
@@ -319,6 +329,10 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
     }
 
     return EXCEPTION_CONTINUE_SEARCH;
+#else
+    (void)ep;
+    return EXCEPTION_CONTINUE_SEARCH;
+#endif
 }
 
 /* ── WinMain ───────────────────────────────────────────────── */
@@ -338,6 +352,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * send diagnostics to buffy_log.txt beside the exe, so a crash or an
      * unexpected exit leaves a record instead of vanishing with the window.
      * Test runs redirect the streams themselves and are left alone. */
+#if defined(_WIN32) /* (Android: stderr goes to logcat, android_main.c) */
     {
         DWORD t = GetFileType(GetStdHandle(STD_ERROR_HANDLE));
         if (t == FILE_TYPE_CHAR || t == FILE_TYPE_UNKNOWN) {
@@ -358,6 +373,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             }
         }
     }
+#endif
 
     /* Unbuffered output for immediate visibility during debugging */
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -375,6 +391,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (!getenv("RECOMP_LAZY_DIRS"))
         _putenv("RECOMP_LAZY_DIRS=1");
     resolve_game_paths();
+    {
+        /* Is this executable the installed release's? Before anything else
+         * starts (a window, the GPU), so the other release's executable can
+         * run in its place (buffy_xbecheck.c). */
+        int buffy_check_xbe_release(const uint8_t *d, size_t n, int *exit_code);
+        void *xd = NULL;
+        size_t xn = 0;
+        int code;
+        if (load_xbe(YOUR_GAME_XBE_PATH, &xd, &xn)) {
+            int go_on = buffy_check_xbe_release((const uint8_t *)xd, xn, &code);
+            free(xd);
+            if (!go_on)
+                return code;
+        }
+    }
 
     /* Audio: no emulated sound chip. DirectSound is replaced whole
      * (buffy_dsound.c: DirectSoundCreate, CommitDeferredSettings,
@@ -585,6 +616,13 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
     return TRUE;
 }
 
+#if defined(BUFFY_ANDROID)
+/* Android: the game thread's entry (android_main.c). */
+int buffy_game_main(void)
+{
+    return WinMain(NULL, NULL, (LPSTR)"", 0);
+}
+#else
 /* Console entry point (for debugging -- lets you see printf output) */
 int main(int argc, char **argv)
 {
@@ -592,6 +630,7 @@ int main(int argc, char **argv)
     (void)argv;
     return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOW);
 }
+#endif
 
 /* Microsecond clock for tools/probe.py probes. */
 unsigned long long buffy_probe_us(void)
@@ -606,7 +645,11 @@ unsigned long long buffy_probe_us(void)
         /* Process start: the creation time, in the same clock. */
         FILETIME c, e, k, u, now;
         ULARGE_INTEGER a, b;
+#if defined(_WIN32)
         GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+#else
+        GetSystemTimeAsFileTime(&c);
+#endif
         GetSystemTimeAsFileTime(&now);
         a.LowPart = c.dwLowDateTime; a.HighPart = c.dwHighDateTime;
         b.LowPart = now.dwLowDateTime; b.HighPart = now.dwHighDateTime;

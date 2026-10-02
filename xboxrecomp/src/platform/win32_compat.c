@@ -797,11 +797,18 @@ DWORD SuspendThread(HANDLE h)
     return prev;
 }
 
+void   view_register(void *addr, size_t len);
+size_t view_take(const void *addr);
+
 BOOL TerminateThread(HANDLE h, DWORD exitCode)
 {
     w32_object *o = (w32_object *)h;
     if (!o || o->kind != K_THREAD) return FALSE;
+#if defined(__ANDROID__)
+    /* bionic has no pthread_cancel: the thread is only marked ended */
+#else
     pthread_cancel(o->thread);
+#endif
     pthread_mutex_lock(&o->lock);
     o->exit_code = exitCode;
     o->exited    = 1;
@@ -1311,6 +1318,9 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 {
 #if defined(__APPLE__)
     memset_s(ptr, cnt, 0, cnt);
+#elif defined(__ANDROID__)
+    volatile unsigned char *v = (volatile unsigned char *)ptr;
+    while (cnt--) *v++ = 0;
 #else
     explicit_bzero(ptr, cnt);
 #endif

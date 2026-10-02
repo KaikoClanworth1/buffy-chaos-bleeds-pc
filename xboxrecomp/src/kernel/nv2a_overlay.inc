@@ -41,6 +41,15 @@ void nv2a_gpu_toast(const char *text, int ms)
     InterlockedIncrement(&s_toast_seq);
 }
 
+/* The FPS limit (nv2a_gpu_set_frame_limit): the panel's target line and what
+ * its FPS colour is measured against. */
+static volatile LONG s_ov_limit = 60;
+
+void nv2a_gpu_set_frame_limit(int fps)
+{
+    InterlockedExchange(&s_ov_limit, fps < 1 ? 60 : fps);
+}
+
 #define OV_HIST 120                         /* frame times kept for the graph */
 static float    s_ov_ft[OV_HIST];           /* milliseconds, oldest first after s_ov_pos */
 static int      s_ov_pos, s_ov_have;
@@ -54,12 +63,14 @@ static GpuTexture    *s_ov_tex;
 static GpuShader     *s_ov_ps;
 static GpuBlendState *s_ov_bs;
 static int      s_ov_tw, s_ov_th;           /* the texture's size */
+#if defined(_WIN32) /* GDI text: the overlay is Windows-only for now */
 static HDC      s_ov_dc;
 static HBITMAP  s_ov_bmp;
 static uint32_t *s_ov_px;                   /* the DIB's pixels, top-down BGRA */
 static int      s_ov_bw, s_ov_bh;
 static HFONT    s_ov_big, s_ov_small, s_ov_label;
 static int      s_ov_font_scale;            /* the scale the fonts were made for (x100) */
+#endif
 static char     s_ov_gpu[128];
 
 /* Once a frame shown in window 1: the time since the last one. */
@@ -95,6 +106,7 @@ static void ov_gpu_name(void)
         strcpy_s(s_ov_gpu, sizeof s_ov_gpu, gpu_adapter_name()[0] ? gpu_adapter_name() : "?");
 }
 
+#if defined(_WIN32) /* guard */
 static int ov_init(void)
 {
     static const char src[] =
@@ -261,16 +273,17 @@ static void ov_compose(float s)
 static int ov_paint(int mode, float s, uint32_t bw, uint32_t bh)
 {
     char t[160];
-    int pad = (int)(14.0f * s), w, h, y, cap = 60;
+    int pad = (int)(14.0f * s), w, h, y, cap = (int)s_ov_limit;
     COLORREF fc;
     ov_fonts(s);
-    if (s_ov_have > 0) {
-        /* the frame limit, from the frame times' median: 30 or 60 */
-        float sum = 0.0f;
-        int i;
-        for (i = 0; i < s_ov_have; i++)
-            sum += s_ov_ft[i];
-        cap = sum / (float)s_ov_have > 25.0f && s_ov_fps < 40.0 ? 30 : 60;
+    if (s_opt_vsync) {
+        /* with vsync, no faster than the monitor refreshes */
+        DEVMODEA dm;
+        memset(&dm, 0, sizeof dm);
+        dm.dmSize = sizeof dm;
+        if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1
+                && (int)dm.dmDisplayFrequency < cap)
+            cap = (int)dm.dmDisplayFrequency;
     }
     fc = ov_fps_colour(s_ov_fps, cap);
     if (mode == 3) {
@@ -389,8 +402,11 @@ static int ov_upload(void)
 }
 
 /* Over window 1's back buffer, after the frame's blit, before Present. */
+#endif
+
 static void gpu_overlay_draw(GpuSwapchain *sc)
 {
+#if defined(_WIN32) /* guard */
     int mode = (int)s_ov_mode;
     GpuTexture *bb, *none = NULL;
     GpuTextureDesc bd;
@@ -444,4 +460,12 @@ static void gpu_overlay_draw(GpuSwapchain *sc)
             gpu_save_bmp(bb, bd.width, bd.height, shot);
         }
     }
+#elif defined(BUFFY_ANDROID)
+    /* the on-screen touch controls (port/android/src/android_touch.c) */
+    void android_touch_draw(GpuSwapchain *sc);
+    if (sc == s_main_sc)
+        android_touch_draw(sc);
+#else
+    (void)sc;
+#endif
 }

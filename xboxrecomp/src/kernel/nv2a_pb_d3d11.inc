@@ -23,10 +23,17 @@
  * On by default when a device can be created; RECOMP_GPU=0 keeps the software
  * rasteriser.
  */
+#if defined(_WIN32) || defined(BUFFY_ANDROID)
 #if defined(_WIN32)
 #include <d3d11_1.h>   /* (d3d11.h and the 11.1 context: constant-buffer offsets) */
 #include <d3dcompiler.h>
 #include <mmsystem.h>
+#else
+/* Android: the GPU layer is Vulkan only. The renderer's few raw Direct3D 11
+ * paths (debug tracing, the D3D11 backend's extras) only run with a D3D11
+ * device, so they are compiled against a header that has none. */
+#include "d3d11_null.h"
+#endif
 #include "gpu.h"          /* the GPU layer (xboxrecomp/src/gpu) */
 #if defined(_MSC_VER)
 #pragma comment(lib, "d3d11.lib")
@@ -109,8 +116,10 @@ static uint64_t s_stage_mode_seen[32];
 
 /* Display options (nv2a_gpu_set_display): the size the game's 640x480 is
  * rendered at (any aspect: 1920x1080 scales x by 3 and y by 2.25), vsync,
- * borderless fullscreen. Requested from any thread, applied by the GPU thread
- * at the next flip. */
+ * and the display mode -- 0 windowed, 1 borderless (a window covering the
+ * monitor), 2 fullscreen (the monitor switched to the render size, at its
+ * best refresh rate, and the window covering it). Requested from any thread,
+ * applied by the GPU thread at the next flip. */
 static volatile LONG s_opt_w = 1280, s_opt_h = 960, s_opt_vsync = 1, s_opt_fullscreen, s_opt_dirty = 1;
 static volatile LONG s_resize_pending;
 
@@ -140,6 +149,11 @@ static float    s_sx = 1.0f, s_sy = 1.0f;     /* ... as scale factors from 640x4
 static volatile int s_native;                  /* the native renderer draws (see gpu_show) */
 static int      s_fullscreen_applied;
 static RECT     s_windowed_rect;
+static volatile LONG s_fs_last = 1;            /* the mode F11 goes back to: 1 or 2 */
+static volatile LONG s_fs_mode_on;             /* the monitor's mode is switched (2) */
+static volatile LONG s_fs_reapply;             /* back to the front: switch it again */
+static WCHAR    s_fs_device[CCHDEVICENAME];     /* ...on this monitor */
+static int      s_fs_mode_w, s_fs_mode_h;
 static void   (*s_display_cb)(int fullscreen);
 static GpuShader      *s_blit_vs, *s_blit_ps;   /* present: a surface into a back buffer */
 static GpuRasterState *s_blit_rs;
@@ -223,10 +237,24 @@ static LRESULT CALLBACK gpu_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         InterlockedExchange(h == s_gpu_hwnd2 && h ? &s_resize2_pending : &s_resize_pending, 1);
         return 0;
     }
-    /* Alt+Enter or F11: windowed <-> borderless fullscreen. */
+    if (m == WM_ACTIVATEAPP && h == s_gpu_hwnd && s_fs_mode_on) {
+        /* Fullscreen: the desktop's own mode back while another program is
+         * in front (the window minimised), the game's again on return. */
+        if (!w) {
+            ChangeDisplaySettingsExW(s_fs_device, NULL, NULL, 0, NULL);
+            ShowWindow(h, SW_MINIMIZE);
+        } else {
+            InterlockedExchange(&s_fs_reapply, 1);
+            InterlockedExchange(&s_opt_dirty, 1);
+        }
+    }
+    /* Alt+Enter or F11: windowed <-> fullscreen (borderless or fullscreen,
+     * whichever was last chosen). */
     if ((m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29))) || (m == WM_KEYDOWN && w == VK_F11)) {
         if (!(l & (1 << 30))) {                     /* not auto-repeat */
-            InterlockedExchange(&s_opt_fullscreen, !s_opt_fullscreen);
+            if (s_opt_fullscreen)
+                InterlockedExchange(&s_fs_last, s_opt_fullscreen);
+            InterlockedExchange(&s_opt_fullscreen, s_opt_fullscreen ? 0 : s_fs_last);
             InterlockedExchange(&s_opt_dirty, 1);
             if (s_display_cb)
                 s_display_cb((int)s_opt_fullscreen);
@@ -268,9 +296,14 @@ int nv2a_gpu_take_wheel(void)
 }
 
 /* Render size (the game's 640x480 drawn at width x height), vsync on/off,
- * borderless fullscreen on/off. Safe from any thread. */
+ * display mode (0 windowed, 1 borderless, 2 fullscreen). Safe from any
+ * thread. */
 void nv2a_gpu_set_display(int width, int height, int vsync, int fullscreen)
 {
+    if (fullscreen < 0 || fullscreen > 2)
+        fullscreen = 1;
+    if (fullscreen)
+        InterlockedExchange(&s_fs_last, fullscreen);
     if (width < 640) width = 640;
     if (height < 480) height = 480;
     if (width > 7680) width = 7680;
@@ -278,11 +311,12 @@ void nv2a_gpu_set_display(int width, int height, int vsync, int fullscreen)
     InterlockedExchange(&s_opt_w, width);
     InterlockedExchange(&s_opt_h, height);
     InterlockedExchange(&s_opt_vsync, vsync != 0);
-    InterlockedExchange(&s_opt_fullscreen, fullscreen != 0);
+    InterlockedExchange(&s_opt_fullscreen, fullscreen);
     InterlockedExchange(&s_opt_dirty, 1);
 }
 
-/* Told when the player toggles fullscreen from the keyboard, to save it. */
+/* Told when the player toggles fullscreen from the keyboard (the mode now),
+ * to save it. */
 void nv2a_gpu_set_display_callback(void (*cb)(int fullscreen))
 {
     s_display_cb = cb;
@@ -877,8 +911,19 @@ static void gpu_screenshot(GpuSurface *s, int window2)
     }
     sprintf_s(path, sizeof path, window2 ? "%s\\shot%03d_p2.bmp" : "%s\\shot%03d.bmp", dir, idx);
     if (getenv("BUFFY_SHOTS_LOG"))
-        fprintf(stderr, "[SHOT] t=%lu %s\n", GetTickCount() / 100 % 100000, path);
-    gpu_save_bmp(s->gt, s->pw, s->ph, path);
+        fprintf(stderr, "[SHOT] t=%lu frame %u %s\n", GetTickCount() / 100 % 100000, s_frame_no, path);
+    {
+        /* BUFFY_SHOTS_FULL: the whole texture the game drew into (it can be
+         * bigger than the guest's size) */
+        GpuTextureDesc td;
+        uint32_t w = s->pw, h = s->ph;
+        if (getenv("BUFFY_SHOTS_FULL") && s->gt) {
+            gpu_texture_desc(s->gt, &td);
+            w = td.width;
+            h = td.height;
+        }
+        gpu_save_bmp(s->gt, w, h, path);
+    }
 }
 
 /* The Xbox flips on vertical blank, and Xbox D3D keeps only a few frames
@@ -953,28 +998,69 @@ static void gpu_apply_display(void)
         gpu_drop_surfaces();
         fprintf(stderr, "  [GPU11] render size %dx%d\n", s_rw, s_rh);
     }
+    int reapply;
     fs = (int)s_opt_fullscreen;
-    if (fs != s_fullscreen_applied && !getenv("BUFFY_NO_WINDOW")) {
-        s_fullscreen_applied = fs;
-        if (fs) {
-            MONITORINFO mi;
-            mi.cbSize = sizeof mi;
-            GetWindowRect(s_gpu_hwnd, &s_windowed_rect);
-            GetMonitorInfoA(MonitorFromWindow(s_gpu_hwnd, MONITOR_DEFAULTTONEAREST), &mi);
-            SetWindowLongPtrA(s_gpu_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-            SetWindowPos(s_gpu_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
-                         mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
-                         SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
-        } else {
-            SetWindowLongPtrA(s_gpu_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-            SetWindowPos(s_gpu_hwnd, HWND_NOTOPMOST, s_windowed_rect.left, s_windowed_rect.top,
-                         s_windowed_rect.right - s_windowed_rect.left,
-                         s_windowed_rect.bottom - s_windowed_rect.top,
-                         SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
-        }
-        InterlockedExchange(&s_resize_pending, 1);
-        gpu_window2_fullscreen(fs);            /* on its own monitor */
+    if (getenv("BUFFY_NO_WINDOW"))
+        return;
+    reapply = (int)InterlockedExchange(&s_fs_reapply, 0);
+    if (fs == s_fullscreen_applied && !reapply
+            && (fs != 2 || (s_fs_mode_w == s_rw && s_fs_mode_h == s_rh)))
+        return;                                      /* as it is */
+    if (s_fs_mode_on && (fs != 2 || s_fs_mode_w != s_rw || s_fs_mode_h != s_rh || !s_fullscreen_applied)) {
+        ChangeDisplaySettingsExW(s_fs_device, NULL, NULL, 0, NULL);   /* the desktop's mode back */
+        InterlockedExchange(&s_fs_mode_on, 0);
     }
+    if (fs) {
+        MONITORINFOEXW mi;
+        if (!s_fullscreen_applied)
+            GetWindowRect(s_gpu_hwnd, &s_windowed_rect);
+        mi.cbSize = sizeof mi;
+        GetMonitorInfoW(MonitorFromWindow(s_gpu_hwnd, MONITOR_DEFAULTTONEAREST), (MONITORINFO *)&mi);
+        if (fs == 2) {
+            /* the monitor to the render size, at the best refresh rate it has for it */
+            DEVMODEW dm, best;
+            DWORD i;
+            memset(&best, 0, sizeof best);
+            for (i = 0;; i++) {
+                memset(&dm, 0, sizeof dm);
+                dm.dmSize = sizeof dm;
+                if (!EnumDisplaySettingsW(mi.szDevice, i, &dm))
+                    break;
+                if ((int)dm.dmPelsWidth == s_rw && (int)dm.dmPelsHeight == s_rh && dm.dmBitsPerPel >= 24
+                        && dm.dmDisplayFrequency > best.dmDisplayFrequency)
+                    best = dm;
+            }
+            wcscpy_s(s_fs_device, CCHDEVICENAME, mi.szDevice);
+            s_fs_mode_w = s_rw;
+            s_fs_mode_h = s_rh;
+            if (!best.dmPelsWidth) {
+                fprintf(stderr, "  [GPU11] fullscreen: the monitor has no %dx%d mode -- borderless instead\n", s_rw, s_rh);
+            } else if (!s_fs_mode_on || reapply) {
+                best.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+                if (ChangeDisplaySettingsExW(mi.szDevice, &best, NULL, CDS_FULLSCREEN, NULL) == DISP_CHANGE_SUCCESSFUL) {
+                    InterlockedExchange(&s_fs_mode_on, 1);
+                    fprintf(stderr, "  [GPU11] fullscreen %dx%d at %lu Hz\n", s_rw, s_rh, best.dmDisplayFrequency);
+                    GetMonitorInfoW(MonitorFromWindow(s_gpu_hwnd, MONITOR_DEFAULTTONEAREST), (MONITORINFO *)&mi);
+                }
+            }
+            if (IsIconic(s_gpu_hwnd))
+                ShowWindow(s_gpu_hwnd, SW_RESTORE);
+        }
+        SetWindowLongPtrA(s_gpu_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(s_gpu_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    } else {
+        SetWindowLongPtrA(s_gpu_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        SetWindowPos(s_gpu_hwnd, HWND_NOTOPMOST, s_windowed_rect.left, s_windowed_rect.top,
+                     s_windowed_rect.right - s_windowed_rect.left,
+                     s_windowed_rect.bottom - s_windowed_rect.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    }
+    if ((fs != 0) != (s_fullscreen_applied != 0))
+        gpu_window2_fullscreen(fs != 0);           /* on its own monitor, borderless */
+    s_fullscreen_applied = fs;
+    InterlockedExchange(&s_resize_pending, 1);
 }
 
 /* Window 2 to borderless fullscreen on its own monitor, or back. */
@@ -1300,9 +1386,37 @@ static void gpu_present(uint32_t offset)
 }
 
 /* Show a finished frame: the window(s), split screen, screenshots, pacing. */
+#if defined(BUFFY_ANDROID)
+/* Android takes the surface away when the app leaves the screen (the screen
+ * off, another app in front). The swap chain on it goes first -- here, on
+ * the thread that presents -- and this thread waits for a new surface (the
+ * game waits with it), then makes a swap chain on that. */
+int   android_surface_lost(void);
+void  android_surface_released(void);
+void *android_window(void);
+
+static void android_surface_sync(void)
+{
+    if (!android_surface_lost())
+        return;
+    if (s_main_sc) {
+        gpu_swapchain_release(s_main_sc);
+        s_main_sc = NULL;
+    }
+    fprintf(stderr, "  [GPU] surface released: paused\n");
+    android_surface_released();
+    s_gpu_hwnd = (HWND)android_window();          /* (waits for the next one) */
+    s_main_sc = gpu_swapchain_create(s_gpu_hwnd);
+    fprintf(stderr, "  [GPU] surface back: %s\n", s_main_sc ? "resumed" : "NO SWAP CHAIN");
+}
+#endif
+
 static void gpu_show(GpuSurface *shown)
 {
     int i;
+#if defined(BUFFY_ANDROID)
+    android_surface_sync();
+#endif
     {
         {
             int target;
@@ -1424,6 +1538,10 @@ void nv2a_gpu_native_scale(float *sx, float *sy)
 /* Show a native frame: `srv` over a texture `pw` x `ph` pixels holding the
  * game's `w` x `h` (640x480) frame. Split screen, the second window,
  * screenshots, pacing and display changes as for an emulated flip. */
+/* (testing) the frame being drawn, and seconds since the GPU came up */
+uint32_t nv2a_gpu_frame_no(void) { return s_frame_no; }
+uint32_t nv2a_gpu_seconds(void) { return (GetTickCount() - s_gpu_t0) / 1000; }
+
 void nv2a_gpu_native_present(GpuTexture *tex, uint32_t w, uint32_t h, uint32_t pw, uint32_t ph)
 {
     static GpuSurface s;
@@ -2380,5 +2498,6 @@ float nv2a_gpu_split_half_aspect(void) { return 8.0f / 9.0f; }
 void nv2a_gpu_show_second_window(int show) { (void)show; }
 void nv2a_gpu_queue_flip(int target) { (void)target; }
 void nv2a_gpu_set_overlay(int mode) { (void)mode; }
+void nv2a_gpu_set_frame_limit(int fps) { (void)fps; }
 static void gpu_draw_batch(void) {}
 #endif

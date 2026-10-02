@@ -76,7 +76,7 @@ enum {
     ID_GAMEDIR, ID_GAMEDIR_CHANGE, ID_PLAY, ID_CLOSE_ON_PLAY, ID_PLAY_STATUS, ID_VERSION, ID_REPORTS_OPEN,
     ID_UPD_STATUS, ID_UPD_CHECK, ID_UPD_APPLY, ID_UPD_NOTES, ID_UPD_AUTO,
     /* settings */
-    ID_WINDOWED, ID_FULLSCREEN, ID_RESOLUTION, ID_VSYNC, ID_SKIP_INTRO, ID_WS_SAFE, ID_INVERT_X, ID_REPORT_BTN, ID_RENDERER, ID_FPS_LIMIT, ID_SHOW_FPS, ID_OVERLAY, ID_INTERP, ID_PRELOAD, ID_DEFAULTS, ID_SAVE,
+    ID_WINDOWED, ID_BORDERLESS, ID_FULLSCREEN, ID_RESOLUTION, ID_VSYNC, ID_SKIP_INTRO, ID_WS_SAFE, ID_INVERT_X, ID_REPORT_BTN, ID_RENDERER, ID_FPS_LIMIT, ID_LANGUAGE, ID_LANG_NOTE, ID_SHOW_FPS, ID_OVERLAY, ID_INTERP, ID_PRELOAD, ID_DEFAULTS, ID_SAVE,
     ID_SETTINGS_STATUS,
     /* mods */
     ID_MODLIST, ID_MOD_DESC, ID_MOD_UP, ID_MOD_DOWN, ID_MOD_OPEN, ID_MOD_REFRESH, ID_MOD_APPLY,
@@ -121,6 +121,15 @@ static int       s_settings_dirty;
 /* FPS limits ([Display] FpsLimit). The game keeps its speed at any of them:
  * the engine scales its per-frame steps (buffy_frame.c). */
 static const int k_fps[] = { 30, 60, 90, 120, 144, 165, 240, 360 };
+
+/* The game's languages ([Game] Language): the ones the European release has
+ * text for. The game is told through XGetLanguage (src/buffy_settings.c). */
+/* (the accented names as character codes: this file is not compiled as UTF-8) */
+static const WCHAR k_fr[] = { L'F', L'r', L'a', L'n', 0xe7, L'a', L'i', L's', 0 };
+static const WCHAR k_es[] = { L'E', L's', L'p', L'a', 0xf1, L'o', L'l', 0 };
+static const struct { const WCHAR *key, *label; } k_lang[] = {
+    { L"English", L"English" }, { L"French", k_fr }, { L"German", L"Deutsch" }, { L"Spanish", k_es },
+};
 
 static const WCHAR *fps_text(LRESULT sel)
 {
@@ -588,6 +597,45 @@ static int disc_title_id(Disc *d, uint32_t *id)
     return disc_read(d, (uint64_t)x->sector * 2048 + cert + 8, id, 4);
 }
 
+/* Which release default.xbe is: the certificate's region and version and the
+ * size of its code (the first section). The port supports two, each its own
+ * executable (the game picks: src/buffy_xbecheck.c) -- another release's
+ * code is at other addresses and cannot run. */
+static const struct { uint32_t region, version, text; } k_releases[] = {
+    { 0x4u, 2, 1196336u },             /* European (PAL), version 2: buffy_chaos_bleeds.exe */
+    { 0x3u, 1, 1193024u },             /* North American, version 1: buffy_chaos_bleeds_usa.exe */
+};
+
+static int release_supported(uint32_t region, uint32_t version, uint32_t text)
+{
+    int i;
+    for (i = 0; i < (int)(sizeof k_releases / sizeof k_releases[0]); i++)
+        if (region == k_releases[i].region && version == k_releases[i].version && text == k_releases[i].text)
+            return i + 1;
+    return 0;
+}
+
+static int disc_xbe_release(Disc *d, uint32_t *region, uint32_t *version, uint32_t *text)
+{
+    DiscFile *x = disc_find(d, L"default.xbe");
+    uint8_t hdr[0x1000];
+    uint32_t base, cert, sect;
+    if (!x || x->size < sizeof hdr || !disc_read(d, (uint64_t)x->sector * 2048, hdr, sizeof hdr)
+            || memcmp(hdr, "XBEH", 4))
+        return 0;
+    memcpy(&base, hdr + 0x104, 4);
+    memcpy(&cert, hdr + 0x118, 4);
+    memcpy(&sect, hdr + 0x120, 4);
+    cert -= base;
+    sect -= base;
+    if (cert + 0xB0 > sizeof hdr || sect + 12 > sizeof hdr)
+        return 0;
+    memcpy(region, hdr + cert + 0xA0, 4);
+    memcpy(version, hdr + cert + 0xAC, 4);
+    memcpy(text, hdr + sect + 8, 4);
+    return 1;
+}
+
 /* ── FFmpeg, for the movies ────────────────────────────────────────────── */
 
 static int find_ffmpeg(WCHAR *out)
@@ -981,6 +1029,17 @@ static int install_run(InstallJob *job)
         disc_close(&d);
         return 0;
     }
+    {
+        uint32_t region = 0, version = 0, text = 0;
+        if (disc_xbe_release(&d, &region, &version, &text) && !release_supported(region, version, text)) {
+            swprintf_s(s_install_msg, 1024,
+                       L"This disc is a release of the game the port does not support yet (region %X, version %u). "
+                       L"The port runs the European (PAL) release, version 2, and the North American release, version 1.",
+                       region, version);
+            disc_close(&d);
+            return 0;
+        }
+    }
     if (!mkdirs(job->target)) {
         swprintf_s(s_install_msg, 1024, L"Could not create %s.", job->target);
         disc_close(&d);
@@ -1039,6 +1098,38 @@ static DWORD WINAPI install_thread(LPVOID unused)
 
 /* ── settings tab ──────────────────────────────────────────────────────── */
 
+/* The installed game's release (1 European, 2 North American, 0 unknown or
+ * none), from its default.xbe. */
+static int installed_release(void)
+{
+    WCHAR path[MAX_PATH];
+    uint8_t hdr[0x1000];
+    uint32_t base, cert, sect, region, version, text;
+    DWORD got = 0;
+    HANDLE h;
+    if (!s_game_dir[0])
+        return 0;
+    join(path, s_game_dir, L"default.xbe");
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    ReadFile(h, hdr, sizeof hdr, &got, NULL);
+    CloseHandle(h);
+    if (got < sizeof hdr || memcmp(hdr, "XBEH", 4))
+        return 0;
+    memcpy(&base, hdr + 0x104, 4);
+    memcpy(&cert, hdr + 0x118, 4);
+    memcpy(&sect, hdr + 0x120, 4);
+    cert -= base;
+    sect -= base;
+    if (cert + 0xB0 > sizeof hdr || sect + 12 > sizeof hdr)
+        return 0;
+    memcpy(&region, hdr + cert + 0xA0, 4);
+    memcpy(&version, hdr + cert + 0xAC, 4);
+    memcpy(&text, hdr + sect + 8, 4);
+    return release_supported(region, version, text);
+}
+
 static void settings_load(void)
 {
     WCHAR p[MAX_PATH];
@@ -1057,8 +1148,12 @@ static void settings_load(void)
         /* ("native", before 0.4, and "emulated", before 0.5: Vulkan now) */
         SendMessageW(ctl(ID_RENDERER), CB_SETCURSEL, !_wcsicmp(r, L"d3d11") ? 1 : 0, 0);
     }
-    CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN,
-                     GetPrivateProfileIntW(L"Display", L"Fullscreen", 1, p) ? ID_FULLSCREEN : ID_WINDOWED);
+    {
+        /* [Display] Fullscreen: 0 windowed, 1 borderless, 2 fullscreen */
+        UINT mode = GetPrivateProfileIntW(L"Display", L"Fullscreen", 1, p);
+        CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN,
+                         mode == 0 ? ID_WINDOWED : mode == 2 ? ID_FULLSCREEN : ID_BORDERLESS);
+    }
     {
         /* the listed limit nearest the setting */
         int fps = (int)GetPrivateProfileIntW(L"Display", L"FpsLimit", 60, p), i, best = 1;
@@ -1071,6 +1166,25 @@ static void settings_load(void)
     CheckDlgButton(s_wnd, ID_OVERLAY, GetPrivateProfileIntW(L"Display", L"DebugOverlay", 0, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_INTERP, GetPrivateProfileIntW(L"Display", L"FrameInterpolation", 0, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_PRELOAD, GetPrivateProfileIntW(L"Game", L"PreloadData", 1, p) ? BST_CHECKED : BST_UNCHECKED);
+    {
+        WCHAR lang[32];
+        int i, sel = 0;
+        GetPrivateProfileStringW(L"Game", L"Language", L"English", lang, 32, p);
+        for (i = 0; i < (int)(sizeof k_lang / sizeof k_lang[0]); i++)
+            if (!_wcsicmp(lang, k_lang[i].key))
+                sel = i;
+        /* The North American release has the game's text in English only
+         * (the European release has French, German and Spanish too). */
+        if (installed_release() == 2) {
+            sel = 0;
+            EnableWindow(ctl(ID_LANGUAGE), FALSE);
+            set_text(ID_LANG_NOTE, L"North American release: English only");
+        } else {
+            EnableWindow(ctl(ID_LANGUAGE), TRUE);
+            set_text(ID_LANG_NOTE, L"");
+        }
+        SendMessageW(ctl(ID_LANGUAGE), CB_SETCURSEL, (WPARAM)sel, 0);
+    }
     CheckDlgButton(s_wnd, ID_VSYNC, GetPrivateProfileIntW(L"Display", L"VSync", 1, p) ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_SKIP_INTRO,
                    GetPrivateProfileIntW(L"Game", L"SkipIntroMovies", 0, p) ? BST_CHECKED : BST_UNCHECKED);
@@ -1110,8 +1224,14 @@ static int settings_save(void)
     WritePrivateProfileStringW(L"Display", L"DebugOverlay", IsDlgButtonChecked(s_wnd, ID_OVERLAY) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Display", L"FrameInterpolation", IsDlgButtonChecked(s_wnd, ID_INTERP) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Game", L"PreloadData", IsDlgButtonChecked(s_wnd, ID_PRELOAD) ? L"1" : L"0", p);
-    WritePrivateProfileStringW(L"Display", L"Fullscreen", IsDlgButtonChecked(s_wnd, ID_FULLSCREEN) ? L"1" : L"0", p);
+    WritePrivateProfileStringW(L"Display", L"Fullscreen", IsDlgButtonChecked(s_wnd, ID_FULLSCREEN) ? L"2"
+                               : IsDlgButtonChecked(s_wnd, ID_BORDERLESS) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Game", L"SkipIntroMovies", IsDlgButtonChecked(s_wnd, ID_SKIP_INTRO) ? L"1" : L"0", p);
+    {
+        LRESULT l = SendMessageW(ctl(ID_LANGUAGE), CB_GETCURSEL, 0, 0);
+        WritePrivateProfileStringW(L"Game", L"Language",
+                                   k_lang[l >= 0 && l < (LRESULT)(sizeof k_lang / sizeof k_lang[0]) ? l : 0].key, p);
+    }
     WritePrivateProfileStringW(L"Display", L"WidescreenWide", IsDlgButtonChecked(s_wnd, ID_WS_SAFE) ? L"0" : L"1", p);
     WritePrivateProfileStringW(L"Controls", L"InvertCameraX", IsDlgButtonChecked(s_wnd, ID_INVERT_X) ? L"1" : L"0", p);
     WritePrivateProfileStringW(L"Debug", L"ReportButton", IsDlgButtonChecked(s_wnd, ID_REPORT_BTN) ? L"1" : L"0", p);
@@ -1129,9 +1249,10 @@ static void settings_defaults(void)
     CheckDlgButton(s_wnd, ID_OVERLAY, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_INTERP, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_PRELOAD, BST_CHECKED);
-    CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN, ID_FULLSCREEN);
+    CheckRadioButton(s_wnd, ID_WINDOWED, ID_FULLSCREEN, ID_BORDERLESS);
     CheckDlgButton(s_wnd, ID_VSYNC, BST_CHECKED);
     CheckDlgButton(s_wnd, ID_SKIP_INTRO, BST_UNCHECKED);
+    SendMessageW(ctl(ID_LANGUAGE), CB_SETCURSEL, 0, 0);          /* English */
     CheckDlgButton(s_wnd, ID_WS_SAFE, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_INVERT_X, BST_UNCHECKED);
     CheckDlgButton(s_wnd, ID_REPORT_BTN, BST_CHECKED);
@@ -2252,8 +2373,8 @@ static void build_ui(void)
     SendMessageW(h, WM_SETFONT, (WPARAM)s_big, TRUE);
     add(TAB_PLAY, L"Button", L"Close the launcher when the game starts", BS_AUTOCHECKBOX | WS_TABSTOP,
         X0, 312, 400, 24, ID_CLOSE_ON_PLAY);
-    add(TAB_PLAY, L"Static", L"While playing: Alt+Enter or F11 switches fullscreen. The game's own Options page "
-                             L"also has Resolution and VSync, and the main menu has Exit.",
+    add(TAB_PLAY, L"Static", L"While playing: F11 or Alt+Enter switches between windowed and fullscreen. The game's "
+                             L"Options page has PC Settings (display, FPS limit, language), and the main menu has Exit.",
         SS_LEFT, X0, 356, 560, 40, 0);
     add(TAB_PLAY, L"Button", L"Open bug reports", BS_PUSHBUTTON | WS_TABSTOP, X0 + 420, 434, 140, 30, ID_REPORTS_OPEN);
     (void)v;
@@ -2270,8 +2391,8 @@ static void build_ui(void)
     /* Settings */
     add(TAB_SETTINGS, L"Button", L"Display", BS_GROUPBOX, X0, 50, 560, 236, 0);
     add(TAB_SETTINGS, L"Button", L"Windowed", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, X0 + 16, 76, 120, 24, ID_WINDOWED);
-    add(TAB_SETTINGS, L"Button", L"Fullscreen", BS_AUTORADIOBUTTON, X0 + 150, 76, 120, 24, ID_FULLSCREEN);
-    add(TAB_SETTINGS, L"Static", L"Borderless, covering the whole monitor.", SS_LEFT, X0 + 276, 80, 270, 20, 0);
+    add(TAB_SETTINGS, L"Button", L"Borderless", BS_AUTORADIOBUTTON, X0 + 150, 76, 120, 24, ID_BORDERLESS);
+    add(TAB_SETTINGS, L"Button", L"Fullscreen", BS_AUTORADIOBUTTON, X0 + 284, 76, 120, 24, ID_FULLSCREEN);
     add(TAB_SETTINGS, L"Static", L"Resolution", SS_LEFT, X0 + 16, 116, 120, 20, 0);
     h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, X0 + 150, 112, 300, 300, ID_RESOLUTION);
     for (i = 0; i < N_RES; i++)
@@ -2305,9 +2426,14 @@ static void build_ui(void)
         X0 + 350, 370, 205, 24, ID_PRELOAD);
     add(TAB_SETTINGS, L"Button", L"Game and controls", BS_GROUPBOX, X0, 410, 560, 108, 0);
     add(TAB_SETTINGS, L"Button", L"Skip the intro movies at start-up", BS_AUTOCHECKBOX | WS_TABSTOP,
-        X0 + 16, 430, 420, 24, ID_SKIP_INTRO);
+        X0 + 16, 430, 290, 24, ID_SKIP_INTRO);
+    add(TAB_SETTINGS, L"Static", L"Language", SS_LEFT, X0 + 330, 434, 80, 20, 0);
+    h = add(TAB_SETTINGS, L"ComboBox", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X0 + 410, 430, 140, 160, ID_LANGUAGE);
+    for (i = 0; i < (int)(sizeof k_lang / sizeof k_lang[0]); i++)
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)k_lang[i].label);
     add(TAB_SETTINGS, L"Button", L"Invert camera left / right (right stick)", BS_AUTOCHECKBOX | WS_TABSTOP,
-        X0 + 16, 458, 420, 24, ID_INVERT_X);
+        X0 + 16, 458, 300, 24, ID_INVERT_X);
+    add(TAB_SETTINGS, L"Static", L"", SS_LEFT, X0 + 330, 462, 225, 20, ID_LANG_NOTE);
     add(TAB_SETTINGS, L"Button", L"Bug report button: click the left stick (or press F12) to save what is on screen",
         BS_AUTOCHECKBOX | WS_TABSTOP, X0 + 16, 486, 530, 24, ID_REPORT_BTN);
     add(TAB_SETTINGS, L"Static", L"Volume, subtitles and vibration are set from Options in the game. PC Settings "
@@ -2568,11 +2694,11 @@ static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
             }
             break;
         }
-        case ID_RESOLUTION: case ID_RENDERER: case ID_FPS_LIMIT:
+        case ID_RESOLUTION: case ID_RENDERER: case ID_FPS_LIMIT: case ID_LANGUAGE:
             if (HIWORD(wp) == CBN_SELCHANGE)
                 s_settings_dirty = 1, set_text(ID_SETTINGS_STATUS, L"");
             break;
-        case ID_WINDOWED: case ID_FULLSCREEN: case ID_VSYNC: case ID_SKIP_INTRO: case ID_WS_SAFE: case ID_INVERT_X:
+        case ID_WINDOWED: case ID_BORDERLESS: case ID_FULLSCREEN: case ID_VSYNC: case ID_SKIP_INTRO: case ID_WS_SAFE: case ID_INVERT_X:
         case ID_REPORT_BTN: case ID_SHOW_FPS: case ID_OVERLAY: case ID_INTERP: case ID_PRELOAD:
             s_settings_dirty = 1;
             set_text(ID_SETTINGS_STATUS, L"");

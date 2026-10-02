@@ -1,6 +1,7 @@
 # ── Game data: never in this repository. Players supply their own disc. ──
 GAME/
 game_files/
+game_files_usa/
 Xbox Iso/
 *.iso
 *.xiso
@@ -15,6 +16,7 @@ TDATA/
 
 # Recompiled game code (generated from your own XBE by port/tools/regen.sh)
 port/src/recomp/gen/
+port/src/recomp/gen_usa/
 xboxrecomp/game_files/
 xboxrecomp/tools/disasm/output/
 xboxrecomp/tools/func_id/output/

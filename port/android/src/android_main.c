@@ -1,45 +1,67 @@
 /*
  * android_main.c -- the Android build's entry (a NativeActivity).
  *
- * Milestone 0: the GPU layer's Vulkan backend on the device. The window's
- * surface gets a swap chain through gpu.h and is cleared, colour cycling,
- * every frame; tapping the screen ends it. stderr (where the port and the
- * GPU layer log) goes to logcat under the tag "buffy":
- *   adb logcat -s buffy
+ * The game is the Windows build's (main.c's WinMain, as buffy_game_main) on
+ * a thread of its own, started once the activity has a surface to draw on;
+ * this thread keeps the activity's events and the controllers' input coming.
+ *
+ * Files: the game folder, games/Buffy Chaos Bleeds in shared storage (the
+ * launcher's GameActivity says where: BUFFY_HOME), is the Windows build's
+ * game folder -- default.xbe and Buffy\ from the disc, buffy_settings.ini,
+ * SaveData\, mods\. Without BUFFY_HOME (started on its own, for tests) it is
+ * the app's own files folder, with the disc in game\ there.
+ *
+ * When the app leaves the screen (the screen off, another app in front) its
+ * surface goes: the renderer lets go of it and the game waits for the next
+ * one (nv2a_pb_d3d11.inc, android_surface_sync).
+ *
+ * stderr (where the port, the kernel and the GPU layer log) goes to logcat
+ * under the tag "buffy":   adb logcat -s buffy
  */
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android_native_app_glue.h>
-#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-#include "gpu.h"
-
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "buffy", __VA_ARGS__)
 
-/* stderr / stdout into logcat: a pipe read by a thread of our own */
+void android_set_data_dir(const char *dir);
+int  android_input_event(const AInputEvent *e);
+int  buffy_game_main(void);
+void buffy_audio_pause(int paused);
+
+/* ── stderr / stdout into logcat: a pipe read by a thread of our own ── */
 static int s_log_pipe[2];
 
 static void *log_thread(void *arg)
 {
-    char buf[1024];
+    char buf[2048];
     ssize_t n;
+    size_t have = 0;
     (void)arg;
-    while ((n = read(s_log_pipe[0], buf, sizeof buf - 1)) > 0) {
+    while ((n = read(s_log_pipe[0], buf + have, sizeof buf - 1 - have)) > 0) {
         char *line = buf, *nl;
-        buf[n] = 0;
+        have += (size_t)n;
+        buf[have] = 0;
         while ((nl = strchr(line, '\n')) != NULL) {
             *nl = 0;
             if (*line)
                 __android_log_write(ANDROID_LOG_INFO, "buffy", line);
             line = nl + 1;
         }
-        if (*line)
+        have = strlen(line);
+        if (have >= sizeof buf - 256) {         /* a very long line: out as it is */
             __android_log_write(ANDROID_LOG_INFO, "buffy", line);
+            have = 0;
+        } else {
+            memmove(buf, line, have);
+        }
     }
     return NULL;
 }
@@ -57,94 +79,183 @@ static void log_to_logcat(void)
     pthread_detach(t);
 }
 
-typedef struct {
-    ANativeWindow *window;
-    GpuSwapchain *sc;
-    int gpu_up, quit;
-} App;
+/* ── the surface ── */
+static ANativeWindow *volatile s_window;
+static pthread_mutex_t s_win_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  s_win_cond = PTHREAD_COND_INITIALIZER;
+static volatile int s_lost, s_released;    /* the surface is going; the renderer let go of it */
+static int s_game_started;
+
+/* The activity's surface: the renderer's "window" (win32_window_null.h).
+ * Waits for one when there is none yet. */
+void *android_window(void)
+{
+    ANativeWindow *w;
+    pthread_mutex_lock(&s_win_lock);
+    while (!s_window)
+        pthread_cond_wait(&s_win_cond, &s_win_lock);
+    w = s_window;
+    pthread_mutex_unlock(&s_win_lock);
+    return w;
+}
+
+/* The renderer, each frame: is the surface going? Then it lets go of it and
+ * says so. */
+int android_surface_lost(void)
+{
+    return s_lost;
+}
+
+void android_surface_released(void)
+{
+    pthread_mutex_lock(&s_win_lock);
+    s_released = 1;
+    s_lost = 0;
+    pthread_cond_broadcast(&s_win_cond);
+    pthread_mutex_unlock(&s_win_lock);
+}
+
+/* ── the game thread ── */
+static void *game_thread(void *arg)
+{
+    int code;
+    (void)arg;
+    code = buffy_game_main();
+    fprintf(stderr, "[ANDROID] the game ended (%d)\n", code);
+    _exit(code);
+    return NULL;
+}
+
+static void start_game(void)
+{
+    pthread_attr_t at;
+    pthread_t t;
+    if (s_game_started++)
+        return;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 32u << 20);     /* deep recompiled call chains */
+    pthread_create(&t, &at, game_thread, NULL);
+    pthread_attr_destroy(&at);
+}
+
+/* The settings Android needs before the game reads its own (first run).
+ * buffy_env.txt in the data folder, if there is one, sets more: a KEY=VALUE
+ * a line (the Windows build's environment switches, for testing). */
+static void android_defaults(const char *data, int home)
+{
+    char game[600], probe[700], line[512];
+    struct stat st;
+    FILE *f;
+    snprintf(probe, sizeof probe, "%s/buffy_env.txt", data);
+    if ((f = fopen(probe, "r")) != NULL) {
+        while (fgets(line, sizeof line, f)) {
+            char *eq = strchr(line, '='), *e = line + strlen(line);
+            while (e > line && (e[-1] == 10 || e[-1] == 13 || e[-1] == 32))   /* (line end, spaces) */
+                *--e = 0;
+            if (line[0] == '#' || !eq)
+                continue;
+            *eq = 0;
+            setenv(line, eq + 1, 1);
+            fprintf(stderr, "[ANDROID] %s=%s (buffy_env.txt)\n", line, eq + 1);
+        }
+        fclose(f);
+    }
+    snprintf(game, sizeof game, home ? "%s" : "%s/game", data);
+    setenv("BUFFY_GAME_DIR", game, 0);
+    setenv("BUFFY_RENDERER", "vulkan", 0);          /* (the GPU layer has no Direct3D here) */
+    setenv("BUFFY_GPU_BACKEND", "vulkan", 0);
+    setenv("BUFFY_SKIP_MOVIES", "1", 0);            /* (no movie player yet) */
+    setenv("RECOMP_LAZY_DIRS", "1", 0);
+    snprintf(probe, sizeof probe, "%s/default.xbe", game);
+    if (stat(probe, &st) != 0) {
+        snprintf(probe, sizeof probe, "%s/DEFAULT.XBE", game);
+        if (stat(probe, &st) != 0)
+            fprintf(stderr, "[ANDROID] no game in %s: copy the disc's files there "
+                            "(default.xbe and the Buffy folder)\n", game);
+    }
+}
 
 static void on_cmd(struct android_app *app, int32_t cmd)
 {
-    App *a = (App *)app->userData;
     switch (cmd) {
     case APP_CMD_INIT_WINDOW:
-        a->window = app->window;
-        if (!a->gpu_up) {
-            a->gpu_up = gpu_init(GPU_BACKEND_VULKAN, a->window);
-            fprintf(stderr, "GPU layer: %s (%s)\n", a->gpu_up ? "up" : "FAILED", gpu_adapter_name());
-        }
-        if (a->gpu_up && !a->sc) {
-            a->sc = gpu_swapchain_create(a->window);
-            fprintf(stderr, "swap chain: %s (%dx%d)\n", a->sc ? "made" : "FAILED",
-                    ANativeWindow_getWidth(a->window), ANativeWindow_getHeight(a->window));
-        }
+        pthread_mutex_lock(&s_win_lock);
+        s_window = app->window;
+        pthread_cond_broadcast(&s_win_cond);
+        pthread_mutex_unlock(&s_win_lock);
+        fprintf(stderr, "[ANDROID] surface %dx%d\n", ANativeWindow_getWidth(app->window),
+                ANativeWindow_getHeight(app->window));
+        start_game();
         break;
     case APP_CMD_TERM_WINDOW:
-        if (a->sc) {
-            gpu_swapchain_release(a->sc);
-            a->sc = NULL;
+        /* The surface is going (the app left the screen): the renderer
+         * lets go of it at its next frame, and the game waits for the next
+         * surface. Not waited for long: a game busy loading presents
+         * nothing for a while. */
+        pthread_mutex_lock(&s_win_lock);
+        s_window = NULL;
+        if (s_game_started) {
+            struct timespec until;
+            s_lost = 1;
+            s_released = 0;
+            clock_gettime(CLOCK_REALTIME, &until);
+            until.tv_sec += 2;
+            while (!s_released && pthread_cond_timedwait(&s_win_cond, &s_win_lock, &until) == 0)
+                ;
         }
-        a->window = NULL;
+        pthread_mutex_unlock(&s_win_lock);
+        fprintf(stderr, "[ANDROID] surface gone%s\n", s_released || !s_game_started ? "" : " (the renderer was busy)");
+        break;
+    case APP_CMD_WINDOW_RESIZED:
+    case APP_CMD_CONFIG_CHANGED:
+        /* the same surface, another size or way up (folded or unfolded,
+         * turned round): the renderer makes its swap chain again at its next
+         * frame -- the surface stays, so it does not wait */
+        if (s_game_started && s_window) {
+            fprintf(stderr, "[ANDROID] surface now %dx%d\n", ANativeWindow_getWidth(s_window),
+                    ANativeWindow_getHeight(s_window));
+            s_lost = 1;
+        }
+        break;
+    case APP_CMD_PAUSE:
+        buffy_audio_pause(1);
+        break;
+    case APP_CMD_RESUME:
+        buffy_audio_pause(0);
         break;
     case APP_CMD_DESTROY:
-        a->quit = 1;
+        _exit(0);
         break;
     }
 }
 
 static int32_t on_input(struct android_app *app, AInputEvent *e)
 {
-    App *a = (App *)app->userData;
-    if (AInputEvent_getType(e) == AINPUT_EVENT_TYPE_MOTION
-            && (AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK) == AMOTION_EVENT_ACTION_UP) {
-        fprintf(stderr, "tap: done\n");
-        ANativeActivity_finish(app->activity);
-        a->quit = 1;
-        return 1;
-    }
-    return 0;
+    (void)app;
+    return android_input_event(e);
 }
 
 void android_main(struct android_app *app)
 {
-    App a;
-    unsigned frames = 0;
-    struct timespec t0, now;
-    memset(&a, 0, sizeof a);
+    const char *home = getenv("BUFFY_HOME");
+    const char *data = home && *home ? home : app->activity->externalDataPath;
     log_to_logcat();
-    fprintf(stderr, "Buffy: Chaos Bleeds (Android) -- milestone 0: Vulkan through the GPU layer\n");
-    app->userData = &a;
+    fprintf(stderr, "[ANDROID] Buffy the Vampire Slayer: Chaos Bleeds -- data in %s\n", data ? data : "?");
+    if (data) {
+        mkdir(data, 0775);
+        android_set_data_dir(data);
+        android_defaults(data, home && *home);
+    }
     app->onAppCmd = on_cmd;
     app->onInputEvent = on_input;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    while (!a.quit && !app->destroyRequested) {
+    for (;;) {
         int events;
         struct android_poll_source *src;
-        /* poll: wait only while there is nothing to draw on */
-        while (ALooper_pollOnce(a.sc ? 0 : -1, NULL, &events, (void **)&src) >= 0) {
+        while (ALooper_pollOnce(-1, NULL, &events, (void **)&src) >= 0) {
             if (src)
                 src->process(app, src);
             if (app->destroyRequested)
-                break;
-        }
-        if (a.sc) {
-            GpuTexture *bb = gpu_swapchain_begin(a.sc, 1);
-            if (bb) {
-                float t = (float)frames / 60.0f;
-                float rgba[4] = { 0.5f + 0.5f * sinf(t), 0.5f + 0.5f * sinf(t + 2.1f), 0.5f + 0.5f * sinf(t + 4.2f), 1.0f };
-                gpu_clear_target(bb, rgba);
-                gpu_swapchain_present(a.sc, 1);
-                frames++;
-            }
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            if (now.tv_sec - t0.tv_sec >= 5) {
-                fprintf(stderr, "%.1f fps\n", frames / (double)(now.tv_sec - t0.tv_sec));
-                frames = 0;
-                t0 = now;
-            }
+                _exit(0);
         }
     }
-    if (a.sc)
-        gpu_swapchain_release(a.sc);
-    fprintf(stderr, "exit\n");
 }

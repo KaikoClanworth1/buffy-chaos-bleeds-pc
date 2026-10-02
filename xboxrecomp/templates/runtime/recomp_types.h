@@ -280,6 +280,13 @@ static inline double recomp_frndint(double value, uint16_t control) {
     default: return nearbyint(value);
     }
 }
+/* cvt(t)ss2si / cvt(t)sd2si: truncated (cvtt) or rounded to nearest even
+ * (cvt, the MXCSR's default mode); NaN or out of range: 0x80000000, as x86
+ * gives -- a C cast is undefined there and ARM saturates. */
+static inline int32_t recomp_cvt_si(double value, int truncate) {
+    double r = truncate ? trunc(value) : nearbyint(value);
+    return (r != r || r >= 2147483648.0 || r < -2147483648.0) ? INT32_MIN : (int32_t)r;
+}
 static inline int64_t recomp_fist(double value, uint16_t control, unsigned bits) {
     double rounded;
     switch((control>>10)&3) {
