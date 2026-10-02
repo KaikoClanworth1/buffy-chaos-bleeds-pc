@@ -71,18 +71,18 @@ set(PORT_SOURCES
     main.c buffy_crt.c buffy_d3dx.c buffy_frame.c buffy_settings.c buffy_menu.c
     buffy_gpuwait.c buffy_mods.c buffy_sfxtrace.c buffy_preload.c
     buffy_saves.c buffy_savefmt.c buffy_native.c buffy_dsound.c buffy_input.c buffy_import.c)
-# not here (src/android_stubs.c): buffy_movie.c buffy_export.c buffy_debug.c
+# not here: buffy_movie.c (src/android_movie.c); (src/android_stubs.c) buffy_export.c buffy_debug.c
 # buffy_profile.c buffy_xbecheck.c buffy_platform.c
 list(TRANSFORM PORT_SOURCES PREPEND ${PORT_DIR}/src/)
 
 add_library(buffy SHARED ${PORT_SOURCES}
     src/android_main.c src/android_win32.c src/android_wide.c src/android_stubs.c src/android_input.c
-    src/android_touch.c src/android_activity.c src/android_canvas.c src/android_driver.c)
+    src/android_touch.c src/android_activity.c src/android_canvas.c src/android_driver.c src/android_movie.c)
 target_include_directories(buffy PRIVATE ${PORT_DIR}/src ${PORT_DIR}/src/recomp ${XBOXRECOMP_DIR}/include)
 target_compile_options(buffy PRIVATE ${FORCE_WIN32})
 target_include_directories(buffy PRIVATE ${XR_SRC}/gpu ${XBOXRECOMP_DIR}/third_party/Vulkan-Headers/include)
 add_dependencies(buffy main_hook file_redirect_hook gsl_alloc_hook hook_impl)
-target_link_libraries(buffy PRIVATE buffy_gen xbox_kernel xbox_gpu native_app_glue adrenotools android log aaudio m dl)
+target_link_libraries(buffy PRIVATE buffy_gen xbox_kernel xbox_gpu native_app_glue adrenotools android log aaudio mediandk m dl)
 # ANativeActivity_onCreate lives in the glue: keep it exported
 set_target_properties(buffy PROPERTIES LINK_FLAGS "-u ANativeActivity_onCreate -u buffy_activity_create")
 # 16 KB pages (Android 15+ devices may use them)

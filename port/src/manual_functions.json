@@ -8,6 +8,7 @@
   "0x001478ED": "D3DXVec3Transform_001478ED",
   "0x00147978": "D3DXVec3TransformNormal_00147978",
   "0x000D5C50": "wrap:EXBaseStats_FrameUpdate_000D5C50",
+  "0x001006B0": "wrap:EXMemCard_Save_001006B0",
   "0x000638E0": "wrap:XItemHandler_Monster_TickCounters_000638E0",
   "0x0001A6E0": "wrap:XItemHandler_Boss_Kakistos_TickCounters_0001A6E0",
   "0x0018F7F8": "XInitDevices_0018F7F8",

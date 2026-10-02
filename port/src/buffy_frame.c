@@ -117,16 +117,18 @@ static void pace_60hz(void)
 #define EXBASEAPP_MAX_FRAME_RATE   0x1B98ACu    /* m_MaxFrameRate (60) */
 #define EXBASEAPP_MIN_FRAME_RATE   0x1B98A8u    /* m_MinFrameRate (30) */
 
-/* What still counts frames rather than time: the game's frame count
- * (EXBaseStats, read for "every 10 / 20 frames" work -- plant growth, combat
- * music, thrown characters) and the monsters' per-frame counters
- * (TickCounters: attack and stun timers in frames, a boss's 300-frame
- * phases). Both stay on a 60 Hz beat: each frame owes 60 / rate ticks, and
- * they run once per whole tick -- every other frame at 120, as at 60 every
- * frame. At 30 the counters run twice a frame; the frame count still moves
- * once, so the "every N frames" work divides it as the console's did. */
+/* What still counts frames rather than time: the game's frame count and
+ * clock (EXBaseStats::FrameUpdate: the count + 1 and the clock + 1/60 s,
+ * read for "every 10 / 20 frames" work -- plant growth, combat music,
+ * thrown characters) and the monsters' per-frame counters (TickCounters:
+ * attack and stun timers in frames, a boss's 300-frame phases). Both stay on
+ * a 60 Hz beat: each frame owes 60 / rate ticks, and they run once per whole
+ * tick -- every other frame at 120, as at 60 every frame, twice a frame at
+ * 30. (The frame count once moved only once a frame below 60: at a 30 limit
+ * the game's clock ran at half speed.) */
 static double s_tick_acc;
 static int s_ticks60 = 1;
+static unsigned s_frames_n, s_stats_n, s_ticks_n;   /* (BUFFY_FRAME_RATE_LOG: this second's) */
 
 void buffy_frame_rate_apply(void)
 {
@@ -165,25 +167,68 @@ void buffy_frame_rate_apply(void)
         s_tick_acc = 0;
     }
     if (getenv("BUFFY_FRAME_RATE_LOG")) {
+        /* the second's frames, frame counts (EXBaseStats) and monster ticks:
+         * the last two 60 a second at any rate (ticks: per monster) */
         static DWORD t;
+        s_frames_n++;
         if (GetTickCount() - t >= 1000) {
             t = GetTickCount();
-            fprintf(stderr, "[RATE] limit %d, engine %d (frame %.2f ms, step x%.3f)\n", limit, fps, avg_ms,
-                    MEMF(0x1B98C0));
+            static uint32_t last_count;
+            fprintf(stderr, "[RATE] limit %d, engine %d (frame %.2f ms, step x%.3f) | %u frames, %u frame counts (+%u), %u monster ticks\n",
+                    limit, fps, avg_ms, MEMF(0x1B98C0), s_frames_n, s_stats_n, MEM32(0x26EB90) - last_count, s_ticks_n);
+            last_count = MEM32(0x26EB90);
+            s_frames_n = s_stats_n = s_ticks_n = 0;
         }
     }
 }
 
 /* void EXBaseStats::FrameUpdate(int) -- 0x000D5C50 (thiscall, ret 4): the
- * frame count, once per 60 Hz tick. */
+ * frame count and clock, once per 60 Hz tick this frame owes (0, 1 or 2). */
 void EXBaseStats_FrameUpdate_000D5C50_orig(void);
 void EXBaseStats_FrameUpdate_000D5C50(void)
 {
+    uint32_t self = g_ecx, ret = MEM32(g_esp), arg = MEM32(g_esp + 4);
+    int i;
     if (s_ticks60 <= 0) {
         g_esp += 8;                                     /* ret 4 */
         return;
     }
-    EXBaseStats_FrameUpdate_000D5C50_orig();
+    for (i = 0; i < s_ticks60; i++) {
+        if (i && getenv("BUFFY_FRAMECOUNT_ONCE"))
+            break;                                      /* (testing: the old once-a-frame count) */
+        if (i) {
+            g_esp -= 8;
+            MEM32(g_esp) = ret;                         /* the call again: return address, argument */
+            MEM32(g_esp + 4) = arg;
+        }
+        g_ecx = self;
+        s_stats_n++;
+        EXBaseStats_FrameUpdate_000D5C50_orig();
+    }
+}
+
+/* EXMemCard::Save -- 0x001006B0 (thiscall, ret 12): the save's state machine,
+ * called each frame while the save dialog is up. It shows "Saving game"
+ * for 180 frames and "Game saved" for 120 (the console's 3 and 2 seconds),
+ * counting card+0x110 down by one a call and hiding the message once it
+ * goes below 0. Kept on the 60 Hz beat: a frame that owes no tick takes
+ * the step back, one that owes two takes another (not below 0, so the
+ * game's own end of the wait still happens) -- at a 30 limit the messages
+ * stayed twice as long. */
+#define MEMCARD_WAIT 0x110u
+void EXMemCard_Save_001006B0_orig(void);
+void EXMemCard_Save_001006B0(void)
+{
+    uint32_t self = g_ecx;
+    int32_t before = (int32_t)MEM32(self + MEMCARD_WAIT), after;
+    EXMemCard_Save_001006B0_orig();
+    after = (int32_t)MEM32(self + MEMCARD_WAIT);
+    if (getenv("BUFFY_FRAME_RATE_LOG") && (after > before || (before >= 0 && after < 0)))
+        fprintf(stderr, "[SAVEWAIT] t=%lu ms: %s (%d)\n", GetTickCount(), after > before ? "wait starts" : "wait over", after);
+    if (after != before - 1 || after < 0)
+        return;                                         /* (not a waiting frame) */
+    after = before - s_ticks60;
+    MEM32(self + MEMCARD_WAIT) = (uint32_t)(after < 0 ? 0 : after);
 }
 
 /* void XItemHandler_Monster::TickCounters() -- 0x000638E0, and Kakistos's
@@ -210,6 +255,7 @@ static void tick_counters(void (*orig)(void))
             MEM32(g_esp) = ret;                         /* the return address again */
         }
         g_ecx = self;
+        s_ticks_n++;
         orig();
     }
     s_in_tick = 0;

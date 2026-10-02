@@ -151,7 +151,7 @@ From v0.3.0 the launcher updates itself. When it starts, it checks [Releases](ht
 
 **Set up:**
 
-1. Download **Buffy-Chaos-Bleeds-Android-v1.0.0.apk** from [Releases](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/releases/latest) and install it. Android asks you to allow installing apps from your browser or file manager first.
+1. Download **Buffy-Chaos-Bleeds-Android-v1.0.1.apk** from [Releases](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/releases/latest) and install it. Android asks you to allow installing apps from your browser or file manager first.
 2. Copy your `.iso` or `.xiso` to the phone.
 3. Open the app and allow **All files access** when it asks. The game lives in `games/Buffy Chaos Bleeds` on the phone's storage, laid out like the PC game folder, so you can copy saves and mods between the two.
 4. On the **Install** tab, pick your disc image and wait for it to unpack. Then press **Play**.
@@ -166,7 +166,9 @@ From v0.3.0 the launcher updates itself. When it starts, it checks [Releases](ht
 
 **Graphics drivers:** under **Settings → Graphics driver** you can load a custom Vulkan driver package (a `.zip` with a `meta.json`, the kind other emulators use), such as Qualcomm's own or Mesa Turnip. If a driver can't start the game, the game uses the phone's own driver instead and the launcher says why. This release was tested with the phone's own driver. The Turnip builds tried on the Fold7 didn't work.
 
-**Not on Android yet:** movies (the cutscene videos are skipped and the story goes on), texture packs (dumping and loading them: the **Textures** tab is there for when they are), the North American release and the FPS counter.
+**Movies:** the phone plays the same converted movies as the PC (H.264 `.mp4`, decoded by the phone's hardware), but it can't convert the disc's own. Copy the `Movies` folder from a PC install into `games/Buffy Chaos Bleeds` on the phone. Without it, the game skips the movies and the story goes on. The **Install** tab says how many it found.
+
+**Not on Android yet:** texture packs (dumping and loading them: the **Textures** tab is there for when they are), the North American release and the FPS counter.
 
 ---
 

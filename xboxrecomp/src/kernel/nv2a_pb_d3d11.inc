@@ -534,7 +534,14 @@ static int gpu_startup(void)
 
     ready = CreateEventA(NULL, TRUE, FALSE, NULL);
     CloseHandle(CreateThread(NULL, 0, gpu_window_thread, ready, 0, NULL));
+#if defined(BUFFY_ANDROID)
+    /* (Android: the window is the app's surface, which a screen turned off
+     * at start-up takes away until it is back on -- waited for, as there is
+     * nothing to do without it; it used to give up after 5 s) */
+    WaitForSingleObject(ready, INFINITE);
+#else
     WaitForSingleObject(ready, 5000);
+#endif
     CloseHandle(ready);
     if (!s_gpu_hwnd)
         return 0;

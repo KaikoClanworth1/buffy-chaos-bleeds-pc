@@ -35,6 +35,7 @@ void android_set_data_dir(const char *dir);
 int  android_input_event(const AInputEvent *e);
 int  buffy_game_main(void);
 void buffy_audio_pause(int paused);
+void android_movie_pause(int paused);   /* android_movie.c */
 
 /* ── stderr / stdout into logcat: a pipe read by a thread of our own ── */
 static int s_log_pipe[2];
@@ -164,7 +165,6 @@ static void android_defaults(const char *data, int home)
     setenv("BUFFY_GAME_DIR", game, 0);
     setenv("BUFFY_RENDERER", "vulkan", 0);          /* (the GPU layer has no Direct3D here) */
     setenv("BUFFY_GPU_BACKEND", "vulkan", 0);
-    setenv("BUFFY_SKIP_MOVIES", "1", 0);            /* (no movie player yet) */
     setenv("RECOMP_LAZY_DIRS", "1", 0);
     snprintf(probe, sizeof probe, "%s/default.xbe", game);
     if (stat(probe, &st) != 0) {
@@ -219,9 +219,11 @@ static void on_cmd(struct android_app *app, int32_t cmd)
         break;
     case APP_CMD_PAUSE:
         buffy_audio_pause(1);
+        android_movie_pause(1);
         break;
     case APP_CMD_RESUME:
         buffy_audio_pause(0);
+        android_movie_pause(0);
         break;
     case APP_CMD_DESTROY:
         _exit(0);

@@ -74,8 +74,12 @@ final class InstallPage {
         go.addView(spacer, new LinearLayout.LayoutParams(1, a.dp(10)));
 
         LinearLayout movies = a.card(view_, "Movies");
-        a.para(movies, "The game's movies are converted for playback by the PC launcher (with FFmpeg). Movie playback "
-            + "on Android is still to come; until then the game skips them.");
+        a.para(movies, "The game's movies are converted for playback by the PC launcher (with FFmpeg); a phone can't "
+            + "decode the disc's own. To have them here, copy the Movies folder from a PC install into games/"
+            + InstallActivity.kFolderName + " (it holds .mp4 files). Without it the game skips the movies.");
+        File mv = new File(InstallActivity.gameFolder(), "Movies");
+        String[] got = mv.list((d, n) -> n.toLowerCase().endsWith(".mp4"));
+        a.para(movies, got != null && got.length > 0 ? "Movies: " + got.length + " found." : "Movies: none yet.");
     }
 
     View view() { return view_; }
