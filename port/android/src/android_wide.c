@@ -370,6 +370,23 @@ int w16_swprintf(wchar_t *buf, size_t n, const wchar_t *fmt, ...)
     return r;
 }
 
+/* fwprintf: formatted as UTF-16, written as UTF-8 (bionic's wide stdio
+ * reads 32-bit characters) */
+int w16_fwprintf(FILE *f, const wchar_t *fmt, ...)
+{
+    wchar_t w[2048];
+    char s[6144];
+    va_list ap;
+    int r;
+    va_start(ap, fmt);
+    r = w16_vswprintf(w, sizeof w / sizeof w[0], fmt, ap);
+    va_end(ap);
+    if (r < 0)
+        return r;
+    w16_to_utf8(w, s, sizeof s);
+    return fputs(s, f) < 0 ? -1 : r;
+}
+
 /* a Windows path (wide, backslashes) as this system's */
 FILE *w16_wfopen(const wchar_t *path, const wchar_t *mode)
 {

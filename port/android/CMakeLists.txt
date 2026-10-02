@@ -21,7 +21,11 @@ add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX BUFFY_ANDROID XBOXRECOMP_NO
 add_compile_options(-fsigned-char -ffp-contract=off -ferror-limit=0 -fms-extensions -Wno-microsoft -fno-strict-aliasing -fwrapv
                     -Wno-unused-parameter -Wno-parentheses-equality -Wno-unused-variable
                     -Wno-unused-but-set-variable -Wno-unused-function -Wno-unused-label
-                    -Wno-incompatible-pointer-types-discards-qualifiers -Wno-pointer-sign)
+                    -Wno-incompatible-pointer-types-discards-qualifiers -Wno-pointer-sign
+                    # with -fshort-wchar, LLVM turns a 16-bit "count to the 0" loop (w16_wcslen's
+                    # own) into a call to libc's wcslen -- bionic's counts 32-bit characters, so
+                    # every wide length came out halved (texture pack paths cut short)
+                    -fno-builtin-wcslen)
 
 # include/windows.h (and friends): the Win32 the port uses, on Android
 set(ANDROID_INC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -82,7 +86,7 @@ target_include_directories(buffy PRIVATE ${PORT_DIR}/src ${PORT_DIR}/src/recomp 
 target_compile_options(buffy PRIVATE ${FORCE_WIN32})
 target_include_directories(buffy PRIVATE ${XR_SRC}/gpu ${XBOXRECOMP_DIR}/third_party/Vulkan-Headers/include)
 add_dependencies(buffy main_hook file_redirect_hook gsl_alloc_hook hook_impl)
-target_link_libraries(buffy PRIVATE buffy_gen xbox_kernel xbox_gpu native_app_glue adrenotools android log aaudio mediandk m dl)
+target_link_libraries(buffy PRIVATE buffy_gen xbox_kernel xbox_gpu native_app_glue adrenotools android log aaudio mediandk jnigraphics m dl)
 # ANativeActivity_onCreate lives in the glue: keep it exported
 set_target_properties(buffy PROPERTIES LINK_FLAGS "-u ANativeActivity_onCreate -u buffy_activity_create")
 # 16 KB pages (Android 15+ devices may use them)

@@ -18,7 +18,7 @@
 #if defined(_WIN32)
 #include <wincodec.h>
 #else
-typedef struct IWICImagingFactory IWICImagingFactory;   /* (no WIC: PNG loading is Windows-only for now) */
+typedef struct IWICImagingFactory IWICImagingFactory;   /* (no WIC: Android has its own codecs below, others none) */
 #define IWICImagingFactory_Release(f) ((void)(f), 0u)
 #endif
 #if defined(_MSC_VER)
@@ -127,6 +127,134 @@ static uint64_t tp_texture_hash(const uint8_t *lvl0, uint32_t fmt, uint32_t bloc
     return tp_fmix(k);
 }
 
+/* DDS replacements, read here on every system: Windows' own DDS codec takes
+ * only the compressed ones, Android has none. */
+/* One of a pixel's channels by its DDS bit mask, as 0..255 (no mask: 255). */
+static uint32_t tp_channel(uint32_t v, uint32_t mask)
+{
+    uint32_t shift = 0;
+    if (!mask)
+        return 255u;
+    while (!((mask >> shift) & 1))
+        shift++;
+    return (uint32_t)((uint64_t)((v & mask) >> shift) * 255 / (mask >> shift));
+}
+
+/* One BC1-3 4x4 block's colours (BGRA), BC1's alpha with them. */
+static void tp_bc_color(const uint8_t *b, uint32_t out[16], int bc1)
+{
+    uint32_t c0 = b[0] | b[1] << 8, c1 = b[2] | b[3] << 8;
+    uint32_t bits = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+    uint32_t r[4], g[4], bl[4], a[4];
+    int i;
+    r[0] = (c0 >> 11) * 255 / 31; g[0] = ((c0 >> 5) & 63) * 255 / 63; bl[0] = (c0 & 31) * 255 / 31;
+    r[1] = (c1 >> 11) * 255 / 31; g[1] = ((c1 >> 5) & 63) * 255 / 63; bl[1] = (c1 & 31) * 255 / 31;
+    a[0] = a[1] = a[2] = a[3] = 255;
+    if (c0 > c1 || !bc1) {
+        r[2] = (2 * r[0] + r[1]) / 3; g[2] = (2 * g[0] + g[1]) / 3; bl[2] = (2 * bl[0] + bl[1]) / 3;
+        r[3] = (r[0] + 2 * r[1]) / 3; g[3] = (g[0] + 2 * g[1]) / 3; bl[3] = (bl[0] + 2 * bl[1]) / 3;
+    } else {
+        r[2] = (r[0] + r[1]) / 2; g[2] = (g[0] + g[1]) / 2; bl[2] = (bl[0] + bl[1]) / 2;
+        r[3] = g[3] = bl[3] = 0; a[3] = 0;
+    }
+    for (i = 0; i < 16; i++) {
+        uint32_t k = (bits >> (i * 2)) & 3;
+        out[i] = a[k] << 24 | r[k] << 16 | g[k] << 8 | bl[k];
+    }
+}
+
+/* A DDS file's top level as BGRA, or NULL: DXT1/2/3/4/5 or 32-bit RGB(A). */
+static uint32_t *tp_read_dds(const uint8_t *d, size_t n, uint32_t *w, uint32_t *h)
+{
+    uint32_t iw, ih, pfflags, fourcc, bits, rm, gm, bm, am, x, y;
+    uint32_t *px;
+    const uint8_t *s = d + 128;
+    if (n < 128 || memcmp(d, "DDS ", 4))
+        return NULL;
+    ih = d[12] | d[13] << 8 | d[14] << 16 | (uint32_t)d[15] << 24;
+    iw = d[16] | d[17] << 8 | d[18] << 16 | (uint32_t)d[19] << 24;
+    pfflags = d[80] | d[81] << 8 | d[82] << 16 | (uint32_t)d[83] << 24;
+    fourcc = d[84] | d[85] << 8 | d[86] << 16 | (uint32_t)d[87] << 24;
+    bits = d[88] | d[89] << 8;
+    rm = d[92] | d[93] << 8 | d[94] << 16 | (uint32_t)d[95] << 24;
+    gm = d[96] | d[97] << 8 | d[98] << 16 | (uint32_t)d[99] << 24;
+    bm = d[100] | d[101] << 8 | d[102] << 16 | (uint32_t)d[103] << 24;
+    am = d[104] | d[105] << 8 | d[106] << 16 | (uint32_t)d[107] << 24;
+    if (!iw || !ih || iw > 16384 || ih > 16384 || !(px = (uint32_t *)malloc((size_t)iw * ih * 4)))
+        return NULL;
+    if (pfflags & 4) {                                  /* DDPF_FOURCC: BC */
+        int kind = fourcc == 0x31545844u ? 1 : (fourcc == 0x32545844u || fourcc == 0x33545844u) ? 2
+                 : (fourcc == 0x34545844u || fourcc == 0x35545844u) ? 3 : 0;
+        uint32_t bb = kind == 1 ? 8 : 16, bw = (iw + 3) / 4, bh = (ih + 3) / 4;
+        if (!kind || 128 + (size_t)bw * bh * bb > n) {
+            free(px);
+            return NULL;
+        }
+        for (y = 0; y < bh; y++)
+            for (x = 0; x < bw; x++) {
+                const uint8_t *b = s + ((size_t)y * bw + x) * bb;
+                uint32_t c[16];
+                int i;
+                tp_bc_color(kind == 1 ? b : b + 8, c, kind == 1);
+                if (kind == 2) {
+                    for (i = 0; i < 16; i++)
+                        c[i] = (c[i] & 0xFFFFFFu) | (uint32_t)(((b[i / 2] >> ((i & 1) * 4)) & 15) * 17) << 24;
+                } else if (kind == 3) {
+                    uint32_t a[8], k;
+                    uint64_t ab = 0;
+                    a[0] = b[0]; a[1] = b[1];
+                    for (k = 0; k < 6; k++)
+                        ab |= (uint64_t)b[2 + k] << (8 * k);
+                    if (a[0] > a[1])
+                        for (k = 1; k < 7; k++) a[k + 1] = ((7 - k) * a[0] + k * a[1]) / 7;
+                    else {
+                        for (k = 1; k < 5; k++) a[k + 1] = ((5 - k) * a[0] + k * a[1]) / 5;
+                        a[6] = 0; a[7] = 255;
+                    }
+                    for (i = 0; i < 16; i++)
+                        c[i] = (c[i] & 0xFFFFFFu) | a[(ab >> (3 * i)) & 7] << 24;
+                }
+                for (i = 0; i < 16; i++) {
+                    uint32_t px_x = x * 4 + (i & 3), px_y = y * 4 + (i >> 2);
+                    if (px_x < iw && px_y < ih)
+                        px[(size_t)px_y * iw + px_x] = c[i];
+                }
+            }
+    } else if ((pfflags & 0x40) && bits == 32 && 128 + (size_t)iw * ih * 4 <= n) {   /* DDPF_RGB */
+        size_t i;
+        for (i = 0; i < (size_t)iw * ih; i++) {
+            uint32_t v = s[i * 4] | s[i * 4 + 1] << 8 | s[i * 4 + 2] << 16 | (uint32_t)s[i * 4 + 3] << 24;
+            px[i] = tp_channel(v, am) << 24 | tp_channel(v, rm) << 16 | tp_channel(v, gm) << 8 | tp_channel(v, bm);
+        }
+        if (!(pfflags & 1) || !am)                      /* (no alpha: opaque) */
+            for (i = 0; i < (size_t)iw * ih; i++)
+                px[i] |= 0xFF000000u;
+    } else {
+        free(px);
+        return NULL;
+    }
+    *w = iw;
+    *h = ih;
+    return px;
+}
+
+/* A .dds file (open, read to its end) as BGRA, or NULL. */
+static uint32_t *tp_read_dds_file(FILE *in, uint32_t *w, uint32_t *h)
+{
+    uint32_t *px = NULL;
+    uint8_t *d;
+    long n;
+    fseek(in, 0, SEEK_END);
+    n = ftell(in);
+    fseek(in, 0, SEEK_SET);
+    if (n > 0 && n < (256L << 20) && (d = (uint8_t *)malloc((size_t)n)) != NULL) {
+        if (fread(d, 1, (size_t)n, in) == (size_t)n)
+            px = tp_read_dds(d, (size_t)n, w, h);
+        free(d);
+    }
+    return px;
+}
+
 #if defined(_WIN32)
 /* ── WIC ── */
 
@@ -201,6 +329,136 @@ done:
     if (cv) IWICFormatConverter_Release(cv);
     if (fr) IWICBitmapFrameDecode_Release(fr);
     if (d) IWICBitmapDecoder_Release(d);
+    if (!px) {
+        /* a DDS WIC does not take (uncompressed): read here */
+        const WCHAR *ext = wcsrchr(path, L'.');
+        FILE *in = NULL;
+        if (ext && !_wcsicmp(ext, L".dds") && !_wfopen_s(&in, path, L"rb") && in) {
+            px = tp_read_dds_file(in, w, h);
+            fclose(in);
+        }
+    }
+    return px;
+}
+
+#elif defined(BUFFY_ANDROID)
+/* Android: the NDK's image codecs (libjnigraphics) -- AImageDecoder reads
+ * PNG (and JPEG / WebP), AndroidBitmap_compress writes PNG -- and DDS here
+ * (BC1-3 and uncompressed 32-bit, level 0), which Android has no codec for.
+ * No factory to make: tp_wic gives a token the callers only test. */
+#include <android/bitmap.h>
+#include <android/data_space.h>
+#include <android/imagedecoder.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+void android_path_from_wide(const wchar_t *in, char *out, size_t n);   /* port/android/src/android_win32.c */
+
+static IWICImagingFactory *tp_wic(void) { return (IWICImagingFactory *)(uintptr_t)1; }
+
+/* RGBA <-> BGRA (the module's pixels are BGRA, as WIC's 32bppBGRA) */
+static void tp_swap_rb(uint32_t *px, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        uint32_t v = px[i];
+        px[i] = (v & 0xFF00FF00u) | ((v & 0xFFu) << 16) | ((v >> 16) & 0xFFu);
+    }
+}
+
+static bool tp_png_out(void *user, const void *data, size_t size)
+{
+    return fwrite(data, 1, size, (FILE *)user) == size;
+}
+
+static int tp_write_png(IWICImagingFactory *f, const WCHAR *path, const uint32_t *px, uint32_t w, uint32_t h)
+{
+    char p[1024];
+    AndroidBitmapInfo info;
+    uint32_t *rgba;
+    FILE *out;
+    int ok;
+    (void)f;
+    android_path_from_wide(path, p, sizeof p);
+    if (!(rgba = (uint32_t *)malloc((size_t)w * h * 4)))
+        return 0;
+    memcpy(rgba, px, (size_t)w * h * 4);
+    tp_swap_rb(rgba, (size_t)w * h);
+    if (!(out = fopen(p, "wb"))) {
+        free(rgba);
+        return 0;
+    }
+    memset(&info, 0, sizeof info);
+    info.width = w;
+    info.height = h;
+    info.stride = w * 4;
+    info.format = ANDROID_BITMAP_FORMAT_RGBA_8888;
+    info.flags = ANDROID_BITMAP_FLAGS_ALPHA_UNPREMUL;
+    ok = AndroidBitmap_compress(&info, ADATASPACE_SRGB, rgba, ANDROID_BITMAP_COMPRESS_FORMAT_PNG, 100, out,
+                                tp_png_out) == ANDROID_BITMAP_RESULT_SUCCESS;
+    fclose(out);
+    free(rgba);
+    if (!ok)
+        unlink(p);
+    return ok;
+}
+
+static uint32_t *tp_read_image(IWICImagingFactory *f, const WCHAR *path, uint32_t *w, uint32_t *h)
+{
+    char p[1024];
+    const char *ext;
+    AImageDecoder *dec = NULL;
+    const AImageDecoderHeaderInfo *hi;
+    uint32_t *px = NULL;
+    int fd;
+    (void)f;
+    android_path_from_wide(path, p, sizeof p);
+    ext = strrchr(p, '.');
+    if (ext && !strcasecmp(ext, ".dds")) {
+        FILE *in = fopen(p, "rb");
+        if (!in) {
+            fprintf(stderr, "  [TEXPACK] %s: can't open (errno %d)\n", p, errno);
+            return NULL;
+        }
+        px = tp_read_dds_file(in, w, h);
+        fclose(in);
+        if (!px)
+            fprintf(stderr, "  [TEXPACK] %s: not a DDS read here (BC1-3 or 32-bit only)\n", p);
+        return px;
+    }
+    if ((fd = open(p, O_RDONLY)) < 0) {
+        fprintf(stderr, "  [TEXPACK] %s: can't open (errno %d)\n", p, errno);
+        return NULL;
+    }
+    {
+        int r = AImageDecoder_createFromFd(fd, &dec);
+        if (r != ANDROID_IMAGE_DECODER_SUCCESS)
+            fprintf(stderr, "  [TEXPACK] %s: not an image Android reads (%d)\n", p, r);
+    }
+    if (dec) {
+        int32_t iw, ih;
+        size_t stride;
+        hi = AImageDecoder_getHeaderInfo(dec);
+        iw = AImageDecoderHeaderInfo_getWidth(hi);
+        ih = AImageDecoderHeaderInfo_getHeight(hi);
+        AImageDecoder_setAndroidBitmapFormat(dec, ANDROID_BITMAP_FORMAT_RGBA_8888);
+        AImageDecoder_setUnpremultipliedRequired(dec, true);
+        stride = AImageDecoder_getMinimumStride(dec);
+        if (iw > 0 && ih > 0 && iw <= 16384 && ih <= 16384 && stride == (size_t)iw * 4
+                && (px = (uint32_t *)malloc(stride * ih)) != NULL) {
+            if (AImageDecoder_decodeImage(dec, px, stride, stride * ih) == ANDROID_IMAGE_DECODER_SUCCESS) {
+                tp_swap_rb(px, (size_t)iw * ih);
+                *w = (uint32_t)iw;
+                *h = (uint32_t)ih;
+            } else {
+                free(px);
+                px = NULL;
+            }
+        }
+        AImageDecoder_delete(dec);
+    }
+    close(fd);
     return px;
 }
 

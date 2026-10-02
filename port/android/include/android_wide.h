@@ -35,6 +35,7 @@ wchar_t *w16_wmemset(wchar_t *d, wchar_t c, size_t n);
 wchar_t *w16_wcsdup(const wchar_t *s);
 int      w16_vswprintf(wchar_t *buf, size_t n, const wchar_t *fmt, va_list ap);
 int      w16_swprintf(wchar_t *buf, size_t n, const wchar_t *fmt, ...);
+int      w16_fwprintf(FILE *f, const wchar_t *fmt, ...);
 wchar_t  w16_towlower(wchar_t c);
 wchar_t  w16_towupper(wchar_t c);
 int      w16_wfopen_s(FILE **f, const wchar_t *path, const wchar_t *mode);
@@ -69,6 +70,7 @@ int      w16_from_utf8(const char *s, wchar_t *out, size_t n);
 #define swprintf    w16_swprintf
 #define swprintf_s  w16_swprintf
 #define _snwprintf  w16_swprintf
+#define fwprintf    w16_fwprintf
 #define towlower    w16_towlower
 #define towupper    w16_towupper
 #define _wfopen_s   w16_wfopen_s

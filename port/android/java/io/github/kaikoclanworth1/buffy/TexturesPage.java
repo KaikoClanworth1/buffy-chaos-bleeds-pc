@@ -20,7 +20,7 @@ final class TexturesPage {
         a_ = a;
         view_ = a.column();
         LinearLayout about = a.card(view_, "Texture packs");
-        a.para(about, "Swap the game's textures for your own, like Dolphin and PCSX2 texture packs. Put a pack's PNGs "
+        a.para(about, "Swap the game's textures for your own, like Dolphin and PCSX2 texture packs. Put a pack's PNG or DDS files "
             + "in textures_replacement/load in the game folder (a PC install's pack copies straight over).");
         counts_ = a.para(about, "");
 
@@ -44,7 +44,7 @@ final class TexturesPage {
         if (f == null) return 0;
         for (File x : f) {
             if (x.isDirectory()) n += pngs(x);
-            else if (x.getName().toLowerCase().endsWith(".png")) n++;
+            else if (x.getName().toLowerCase().endsWith(".png") || x.getName().toLowerCase().endsWith(".dds")) n++;
         }
         return n;
     }
