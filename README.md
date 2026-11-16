@@ -9,7 +9,7 @@ This is a native Windows port of the 2003 Xbox game *Buffy the Vampire Slayer: C
 It also adds:
 
 - **Sharp resolutions**: 720p, 1080p, 1440p and 4K, plus the original 4:3 sizes.
-- **High frame rates**: a steady 60 fps by default, or up to 360 with the game still at its own speed, from a native renderer with plenty of headroom. It draws through **Vulkan** by default, or **Direct3D 11**. See [Graphics](#graphics-vulkan-and-direct3d-11).
+- **High frame rates**: a steady 60 fps by default, or smooth frames in between up to 360, from a native renderer with plenty of headroom. It draws through **Vulkan** by default, or **Direct3D 11**. See [Graphics](#graphics-vulkan-and-direct3d-11).
 - **A launcher** that installs, configures and starts the game.
 - **Mods**: switch them on and off with a checkbox. The mods don't change the game files on disk.
 - **Story co-op**: a second player can join the campaign, in two windows or on a split screen.
@@ -59,6 +59,7 @@ It also adds:
 - [Story co-op guide](#story-co-op-guide)
 - [Building from source](#building-from-source)
 - [Troubleshooting](#troubleshooting)
+- [Support the project](#support-the-project)
 - [Contributors](#contributors)
 - [Legal and credits](#legal-and-credits)
 
@@ -151,7 +152,7 @@ From v0.3.0 the launcher updates itself. When it starts, it checks [Releases](ht
 
 **Set up:**
 
-1. Download **Buffy-Chaos-Bleeds-Android-v1.0.2.apk** from [Releases](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/releases/latest) and install it. Android asks you to allow installing apps from your browser or file manager first.
+1. Download **Buffy-Chaos-Bleeds-Android-v1.0.3.apk** from [Releases](https://github.com/KaikoClanworth1/buffy-chaos-bleeds-pc/releases/latest) and install it. Android asks you to allow installing apps from your browser or file manager first.
 2. Copy your `.iso` or `.xiso` to the phone.
 3. Open the app and allow **All files access** when it asks. The game lives in `games/Buffy Chaos Bleeds` on the phone's storage, laid out like the PC game folder, so you can copy saves and mods between the two.
 4. On the **Install** tab, pick your disc image and wait for it to unpack. Then press **Play**.
@@ -219,7 +220,7 @@ You can change these in the launcher's **Settings** tab. In the game, **Options 
 | **Resolution** | 1920×1080 is the default. 1280×720, 2560×1440 and 3840×2160 are also 16:9. The original 4:3 sizes are 640×480, 1280×960, 1920×1440 and 2560×1920. Menus and movies stay 4:3, with bars at the sides. |
 | **VSync** | Waits for the monitor's refresh, so the picture doesn't tear. |
 | **Renderer** | **Vulkan (recommended)** or **Direct3D 11**. See [Graphics](#graphics-vulkan-and-direct3d-11). |
-| **FPS limit** | 30, 60 (the default), 90, 120, 144, 165, 240 or 360. The game keeps its own speed at any of them: the engine scales each frame's step to the frame rate, the way the console's 50 Hz PAL version ran at the right speed. With VSync on, the frame rate also stops at your monitor's refresh rate. |
+| **FPS limit** | 30, 60 (the default), 90, 120, 144, 165, 240 or 360. Up to 60 the game itself runs at the limit, keeping its own speed. Above 60 the game runs at 60, as it was made to (some of it counts frames: above 60 you could get stuck, for example climbing through the cemetery window), and the frames in between are drawn smoothly from the game's frames, evenly spaced: 120 at 144 or 165, 240 at 240 or 360. With Vulkan those frames are drawn on a thread of their own, so they don't slow the game. The picture shown is then one game frame (about 17 ms) behind. With VSync on, the frame rate also stops at your monitor's refresh rate. |
 | **Show FPS counter** | A small frame-rate counter in the top-left corner. |
 | **Debug overlay** | A panel in the top-left corner with the frame rate, average and worst frame time, a graph of recent frame times, the renderer in use, the resolution and VSync, and your graphics card. |
 | **Widescreen: keep the original side-to-side view** | On by default. It shows the original view with the top and bottom trimmed, which avoids pop-in and clipping at the edges of the screen. Untick it for the game's own wider view. |
@@ -477,6 +478,16 @@ The translated game code is **generated on your machine from your own disc**. It
 - **Player 2's window is missing.** On player 1's pause menu, go to **Co-op**, then **Screens**, and choose **Two Windows** again. The window opens on the primary screen, and you can drag it from there.
 
 ---
+
+## Support the project
+
+The port, the launcher and every update are free and stay free. Supporting is optional and unlocks nothing: everyone gets the same port.
+
+If you'd like to help anyway:
+
+- **Patreon:** https://www.patreon.com/c/KaikoClanworth
+- **Ko-fi:** https://ko-fi.com/kaikoclanworth
+- **PayPal:** https://www.paypal.com/donate/?hosted_button_id=MS4C2WC38N3W2
 
 ## Contributors
 

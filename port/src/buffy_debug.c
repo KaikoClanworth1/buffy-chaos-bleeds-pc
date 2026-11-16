@@ -83,6 +83,12 @@ static void write_report(const wchar_t *dir, const char *trigger)
             buffy_settings_display_mode_name(buffy_settings_fullscreen()),
             buffy_settings_widescreen_wide() ? "wide" : "original", buffy_settings_invert_camera_x() ? "on" : "off");
     {
+        /* (the frame rate the game runs at: some of its timing counts frames) */
+        int buffy_settings_fps_limit(void), buffy_settings_frame_interpolation(void);
+        fprintf(f, "fps limit %d, engine running at %u, frame interpolation %s\n", buffy_settings_fps_limit(),
+                MEM32(0x1B98ACu), buffy_settings_frame_interpolation() ? "on" : "off");
+    }
+    {
         const char *ini = buffy_settings_path();
         if (ini && *ini)
             fprintf(f, "texture packs: load %d, prefetch %d, dump %d\n",

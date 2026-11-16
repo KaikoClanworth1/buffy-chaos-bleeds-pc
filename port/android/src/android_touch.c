@@ -283,10 +283,19 @@ static void stick_move(Circle *c, float x, float y, float *sx, float *sy, float 
         dx /= len;
         dy /= len;
     }
-    *sx = dx;
-    *sy = -dy;
     knob[0] = c->x + dx * c->r;
     knob[1] = c->y + dy * c->r;
+    {
+        /* the game reads the Xbox pad's square: a full diagonal is full on
+         * both axes (buffy_input.c, stick) -- else it can only walk */
+        float l = sqrtf(dx * dx + dy * dy), big = fabsf(dx) > fabsf(dy) ? fabsf(dx) : fabsf(dy);
+        if (big > 0.0f) {
+            dx *= l / big;
+            dy *= l / big;
+        }
+    }
+    *sx = dx > 1.0f ? 1.0f : dx < -1.0f ? -1.0f : dx;
+    *sy = -(dy > 1.0f ? 1.0f : dy < -1.0f ? -1.0f : dy);
 }
 
 static void dpad_at(float x, float y)

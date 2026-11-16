@@ -52,6 +52,16 @@ GpuBackend gpu_backend(void);
 const char *gpu_adapter_name(void);          /* "NVIDIA GeForce ...", for logs and the overlay */
 void       gpu_flush(void);                  /* submit what is recorded (no wait) */
 
+/* Another thread that draws (Vulkan only; NULL with Direct3D 11): its own
+ * context, made and bound on that thread; gpu_context_bind(NULL) goes back to
+ * the first (the game's). gpu_set_sample_only: that thread's draws sample
+ * textures as they are, without changing their layout -- for textures the
+ * other thread owns, made readable by it first (gpu_texture_prepare_sample). */
+void      *gpu_context_create(void);
+void       gpu_context_bind(void *ctx);
+void       gpu_set_sample_only(int on);
+void       gpu_texture_prepare_sample(GpuTexture *t);
+
 /* ── formats ─────────────────────────────────────────────────────────── */
 
 typedef enum {

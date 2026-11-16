@@ -23,6 +23,7 @@ int  buffy_settings_language_index(void);   /* 0 English, 1 French, 2 German, 3 
 int  buffy_settings_language_running(void); /* ...the one the game started in */
 void buffy_settings_step_language(int dir); /* next / previous, saved for the next start */
 int  buffy_settings_fps_limit(void);         /* 30 to 360: the frame cap (the game keeps its speed: buffy_frame.c) */
+int  buffy_settings_game_rate(void);         /* the game's own rate: the limit up to 60 (frames above it drawn in between) */
 int  buffy_settings_show_fps(void);          /* the FPS counter */
 int  buffy_settings_overlay(void);           /* the debug overlay */
 void buffy_settings_set_fps_limit(int fps);

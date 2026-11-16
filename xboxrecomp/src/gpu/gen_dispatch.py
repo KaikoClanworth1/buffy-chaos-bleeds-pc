@@ -9,6 +9,10 @@ SIGS = [
     # (return, name, params, defaults-on-failure)
     ("const char *", "adapter_name", "void", '""'),
     ("void", "flush", "void", None),
+    ("void *", "context_create", "void", "NULL"),
+    ("void", "context_bind", "void *ctx", None),
+    ("void", "set_sample_only", "int on", None),
+    ("void", "texture_prepare_sample", "GpuTexture *t", None),
     ("GpuBuffer *", "buffer_create", "uint32_t bytes, unsigned bind, GpuUsage usage, const void *init", "NULL"),
     ("void", "buffer_release", "GpuBuffer *b", None),
     ("void *", "buffer_map", "GpuBuffer *b, GpuMap how", "NULL"),

@@ -60,7 +60,7 @@ static void buffer_upload(GpuBuffer *b, uint32_t off, const void *data, uint32_t
     c.srcOffset = so; c.dstOffset = off; c.size = bytes;
     vkCmdCopyBuffer(cmd(), sb, b->buf, 1, &c);
     global_barrier(cmd());
-    b->last_use = s_serial;
+    use_at(&b->last_use);
 }
 
 GpuBuffer *vk_buffer_create(uint32_t bytes, unsigned bind, GpuUsage usage, const void *init)
@@ -204,9 +204,9 @@ void vk_buffer_copy(GpuBuffer *dst, uint32_t dst_off, GpuBuffer *src, uint32_t s
     dst->copy_gen = s_copy_gen;
     src->src_gen = s_copy_gen;
 done:
-    dst->last_use = s_serial;
-    if (src->buf) src->last_use = s_serial;
-    else src->ver[src->cur].last_use = s_serial;
+    use_at(&dst->last_use);
+    if (src->buf) use_at(&src->last_use);
+    else use_at(&src->ver[src->cur].last_use);
 }
 
 /* The buffer and offset a draw reads (a constant buffer's shadow into the ring). */
@@ -230,10 +230,10 @@ static VkBuffer buffer_for_draw(GpuBuffer *b, VkDeviceSize *off)
         return b->rbuf;
     }
     if (b->nver) {
-        b->ver[b->cur].last_use = s_serial;
+        use_at(&b->ver[b->cur].last_use);
         return b->ver[b->cur].buf;
     }
-    b->last_use = s_serial;
+    use_at(&b->last_use);
     return b->buf;
 }
 
@@ -476,7 +476,7 @@ GpuTexture *vk_texture_create(const GpuTextureDesc *desc, const GpuSubresource *
             if (sp) {
                 end_rendering();
                 record_texture_upload(cmd(), t, init, sp, sb, so);
-                t->last_use = s_serial;
+                use_at(&t->last_use);
             }
         } else {
             OneShot o;
@@ -567,7 +567,7 @@ void vk_texture_update(GpuTexture *t, uint32_t face, uint32_t mip, const void *d
     r.imageExtent.width = w; r.imageExtent.height = h; r.imageExtent.depth = 1;
     vkCmdCopyBufferToImage(cmd(), sb, t->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
     image_barrier(cmd(), t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    t->last_use = s_serial;
+    use_at(&t->last_use);
     PROF_END(0, PR_TEXUP);
 }
 
@@ -599,9 +599,9 @@ void vk_texture_copy_region(GpuTexture *dst, uint32_t dx, uint32_t dy, GpuTextur
         c.dstOffset.x = (int32_t)dx; c.dstOffset.y = (int32_t)dy;
         c.extent.width = w; c.extent.height = h; c.extent.depth = 1;
         vkCmdCopyImage(cmd(), src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
-        dst->last_use = s_serial;
+        use_at(&dst->last_use);
     }
-    src->last_use = s_serial;
+    use_at(&src->last_use);
 }
 
 void vk_texture_copy(GpuTexture *dst, GpuTexture *src)

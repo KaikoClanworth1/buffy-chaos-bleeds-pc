@@ -192,11 +192,17 @@ static void vk_pcache_save(int force)
         return;
     s_pcache_saved_ms = now;
     s_pcache_dirty = 0;
-    if (!pcache_path(path, sizeof path) || vkGetPipelineCacheData(s_dev, s_pcache, &size, NULL) != VK_SUCCESS || !size)
+    if (!pcache_path(path, sizeof path))
         return;
-    if (!(data = malloc(size)))
+    lock(&s_pipelock);                            /* (another context may be adding to it) */
+    if (vkGetPipelineCacheData(s_dev, s_pcache, &size, NULL) != VK_SUCCESS || !size || !(data = malloc(size))) {
+        unlock(&s_pipelock);
         return;
-    if (vkGetPipelineCacheData(s_dev, s_pcache, &size, data) == VK_SUCCESS) {
+    }
+    if (vkGetPipelineCacheData(s_dev, s_pcache, &size, data) != VK_SUCCESS)
+        size = 0;
+    unlock(&s_pipelock);
+    if (size) {
         snprintf(tmp, sizeof tmp, "%s.tmp", path);
         if ((f = fopen(tmp, "wb")) != NULL) {
             int ok = fwrite(data, 1, size, f) == size;
@@ -416,18 +422,24 @@ static VkPipeline make_pipeline(const PipeKey *k, GpuShader *vs_, GpuShader *ps_
 static VkPipeline pipeline_for(const PipeKey *k, GpuShader *vs, GpuShader *ps, GpuLayout *il)
 {
     uint32_t h = pipe_hash(k), i;
+    VkPipeline p = VK_NULL_HANDLE;
+    lock(&s_pipelock);                            /* (the table is the contexts') */
     for (i = 0; i < PIPE_CACHE; i++) {
         PipeEntry *e = &s_pipes[(h + i) & (PIPE_CACHE - 1)];
         if (!e->used) {
             e->key = *k;
             e->pipe = make_pipeline(k, vs, ps, il);
             e->used = 1;
-            return e->pipe;
+            p = e->pipe;
+            break;
         }
-        if (!memcmp(&e->key, k, sizeof *k))
-            return e->pipe;
+        if (!memcmp(&e->key, k, sizeof *k)) {
+            p = e->pipe;
+            break;
+        }
     }
-    return VK_NULL_HANDLE;
+    unlock(&s_pipelock);
+    return p;
 }
 
 /* ── rendering ─────────────────────────────────────────────────────────── */
@@ -467,8 +479,8 @@ static void begin_rendering(void)
     s_rendering = 1;
     s_pass_rt = st.rt;
     s_pass_ds = st.ds;
-    if (st.rt) st.rt->last_use = s_serial;
-    if (st.ds) st.ds->last_use = s_serial;
+    if (st.rt) use_at(&st.rt->last_use);
+    if (st.ds) use_at(&st.ds->last_use);
 }
 
 /* (testing) BUFFY_VK_FULL_PUSH=1: every draw pushes all its descriptors */
@@ -503,7 +515,8 @@ static int draw_setup(void)
     }
     for (i = 0; i < 8; i++) {
         GpuTexture *t = st.tex[i];
-        if (t && t->img && t->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && t != st.rt) {
+        if (t && t->img && t->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && t != st.rt
+                && !CUR()->sample_only) {
             end_rendering();
             image_barrier(cmd(), t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
@@ -542,7 +555,7 @@ static int draw_setup(void)
             k.color = color;
             k.depth = depth;
             k.topo_class = tc;
-            k.depth_clamp = st.rs ? !st.rs->d.depth_clip : 0;
+            k.depth_clamp = st.rs && s_depth_clamp ? !st.rs->d.depth_clip : 0;
             p = pipeline_for(&k, st.vs, st.ps, st.il);
             s_last_pipe.vs = st.vs; s_last_pipe.ps = st.ps; s_last_pipe.il = st.il;
             s_last_pipe.bs = st.bs; s_last_pipe.rs = st.rs; s_last_pipe.color = color; s_last_pipe.depth = depth;
@@ -664,14 +677,14 @@ static int draw_setup(void)
         ii[i].sampler = VK_NULL_HANDLE;
         ii[i].imageView = t->view;
         ii[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        t->last_use = s_serial;
+        use_at(&t->last_use);
     }
     for (i = 0; i < 4; i++) {
         GpuSampler *s = st.smp[i] ? st.smp[i] : s_dummysmp;
         ii[8 + i].sampler = s->s;
         ii[8 + i].imageView = VK_NULL_HANDLE;
         ii[8 + i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        s->last_use = s_serial;
+        use_at(&s->last_use);
     }
     if (s_full_push < 0)
         s_full_push = getenv("BUFFY_VK_FULL_PUSH") && getenv("BUFFY_VK_FULL_PUSH")[0] == '1';
@@ -796,7 +809,7 @@ void vk_clear_target(GpuTexture *t, const float rgba[4])
     r.levelCount = 1;
     r.layerCount = 1;
     vkCmdClearColorImage(cmd(), t->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1, &r);
-    t->last_use = s_serial;
+    use_at(&t->last_use);
 }
 
 void vk_clear_depth(GpuTexture *t, unsigned flags, float z, uint8_t stencil)
@@ -829,5 +842,5 @@ void vk_clear_depth(GpuTexture *t, unsigned flags, float z, uint8_t stencil)
     r.levelCount = 1;
     r.layerCount = 1;
     vkCmdClearDepthStencilImage(cmd(), t->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &r);
-    t->last_use = s_serial;
+    use_at(&t->last_use);
 }

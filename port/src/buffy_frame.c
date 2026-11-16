@@ -76,8 +76,8 @@ static void pace_60hz(void)
     if (!on)
         return;
     {
-        int buffy_settings_fps_limit(void);
-        period = freq.QuadPart / buffy_settings_fps_limit();
+        int buffy_settings_game_rate(void);
+        period = freq.QuadPart / buffy_settings_game_rate();   /* (frames above it: drawn in between, buffy_native.c) */
     }
     QueryPerformanceCounter(&now);
     if (!next.QuadPart || now.QuadPart >= next.QuadPart) {
@@ -136,7 +136,8 @@ void buffy_frame_rate_apply(void)
     static LARGE_INTEGER freq, last;
     static double avg_ms;                          /* recent frame time (wall clock) */
     LARGE_INTEGER now;
-    int limit = buffy_settings_fps_limit(), fps;
+    int buffy_settings_game_rate(void);
+    int limit = buffy_settings_game_rate(), fps;
     uint32_t min = MEM32(EXBASEAPP_MIN_FRAME_RATE);
 
     if (getenv("BUFFY_UNCAPPED") && getenv("BUFFY_UNCAPPED")[0] == '1')

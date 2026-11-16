@@ -205,18 +205,16 @@ static VkDevice s_dev;
 static VkQueue s_queue;
 static uint32_t s_qfam;
 static VmaAllocator s_vma;
-static VkCommandPool s_pool, s_upool;         /* the render thread's, other threads' uploads */
+static VkCommandPool s_upool;                 /* other threads' uploads (a context has its own pool) */
 static Lock s_qlock, s_ulock, s_deadlock;
 static unsigned long s_render_tid;
-static Frame s_frames[FRAMES];
-static int s_fi;
-static uint64_t s_serial, s_done_serial;
+static uint64_t s_done_serial;                 /* every submission up to this one is done (ctx_done) */
+static uint64_t s_serial_next;                 /* the serials of all contexts' frames, in order */
 static Dead *s_dead;
 static int s_ndead, s_capdead;
-static VkSemaphore s_waits[8];
-static int s_nwaits;
 static char s_adapter[256];
 static int s_custom_border;
+static int s_depth_clamp = 1;                 /* the GPU can clamp depth (pipelines' depth_clamp) */
 static int s_soft_bc;                         /* decode BC1-3 on the CPU (the GPU has no BC, or BUFFY_VK_SOFT_BC) */
 static VkFormat s_depth_fmt = VK_FORMAT_D24_UNORM_S8_UINT;
 static VkDeviceSize s_ubo_align = 256;
@@ -228,7 +226,6 @@ static GpuBuffer *s_dummyubo, *s_dummyvb;
 static int s_up;
 static volatile long s_next_id;               /* shaders and layouts: pipeline keys */
 
-static VkCommandBuffer cmd(void) { return s_frames[s_fi].cmd; }
 
 /* ── deferred destruction ──────────────────────────────────────────────── */
 
@@ -326,7 +323,7 @@ static void image_barrier(VkCommandBuffer cb, GpuTexture *t, VkImageLayout to)
 
 /* ── the state (the immediate context) ─────────────────────────────────── */
 
-static struct {
+typedef struct {
     GpuTexture *rt, *ds;
     GpuViewport vp;
     int have_vp;
@@ -344,23 +341,19 @@ static struct {
     struct { GpuBuffer *b; uint32_t first, count; } cb[2][2];     /* [stage][slot] */
     GpuTexture *tex[8];
     GpuSampler *smp[4];
-} st;
-
-static int s_rendering;
-static GpuTexture *s_pass_rt, *s_pass_ds;
-static VkPipeline s_bound_pipe;
+} VkSt;
 
 /* What the command buffer already has: dynamic state and the pipeline's
  * inputs, so a draw records only what changed. valid = 0 at each new
  * command buffer; s_state_epoch moves when a state object, shader or layout
  * is released (its address may come back as another). */
-static struct {
+typedef struct {
     int valid;
     VkViewport vp;
     VkRect2D sc;
     int cull, ff, topo, dt, dw, dcmp, stt, sfail, spass, sdfail, scmp;
     uint32_t rmask, wmask, ref;
-} s_dyn;
+} VkDyn;
 
 /* Qualcomm's driver loses the dynamic state (cull mode, depth test...) set
  * in an earlier render pass, though Vulkan keeps it for the command buffer:
@@ -368,7 +361,7 @@ static struct {
  * through. There each pass sets it all again (begin_rendering;
  * BUFFY_VK_DYN_PER_PASS=0/1 overrides, for testing). */
 static int s_dyn_per_pass;
-static struct {
+typedef struct {
     GpuShader *vs, *ps;
     GpuLayout *il;
     GpuBlendState *bs;
@@ -376,13 +369,13 @@ static struct {
     VkFormat color, depth;
     uint32_t topo_class, epoch;
     VkPipeline pipe;
-} s_last_pipe;
+} VkLastPipe;
 static uint32_t s_state_epoch = 1;
 
 /* The bindings the command buffer already has: a draw pushes only the
  * descriptors that changed (push descriptors keep the rest) and binds only
  * the vertex / index buffers that moved. valid = 0 at each new one. */
-static struct {
+typedef struct {
     int valid;
     VkDescriptorBufferInfo bi[2];
     VkDescriptorImageInfo ii[12];
@@ -390,7 +383,7 @@ static struct {
     VkDeviceSize voff[16], vstride[16];
     VkBuffer ib;
     VkDeviceSize ioff;
-} s_bound;
+} VkBound;
 
 /* Buffer copies (gpu_buffer_copy: frame interpolation records every draw's
  * vertices and indices with one) cannot be recorded inside rendering, and
@@ -398,9 +391,109 @@ static struct {
  * and done together the next time rendering ends -- or first, when a draw
  * would read a buffer one of them writes. */
 typedef struct { VkBuffer src, dst; VkBufferCopy c; } PendingCopy;
-static PendingCopy *s_pc;
-static int s_npc, s_cappc;
-static uint64_t s_copy_gen = 1;
+
+/* ── contexts ──────────────────────────────────────────────────────────────
+ *
+ * What a thread records with: its command buffers, frames (fences, upload
+ * rings), the bound state and what the command buffer already has. The
+ * game's thread uses the first (s_ctx0, the one vk_init makes); another
+ * thread that draws -- the presenter that shows the frames in between
+ * (buffy_native.c) -- binds one of its own (vk_context_create / _bind), and
+ * from then on records and submits on its own. What they share: the device
+ * and queue (submissions under s_qlock), the pipeline table (s_pipelock), and
+ * the lifetimes of objects -- every frame of every context takes the next
+ * serial, an object keeps the highest that used it (use_at), and it goes
+ * once no context has a frame up to that serial still pending (ctx_done).
+ * A texture's layout is the game thread's to change; the presenter samples
+ * the game's textures as they are (draw_setup). */
+typedef struct VkCtx {
+    VkSt st_;
+    int rendering;
+    GpuTexture *pass_rt, *pass_ds;
+    VkPipeline bound_pipe;
+    VkDyn dyn;
+    VkLastPipe last_pipe;
+    VkBound bound;
+    PendingCopy *pc;
+    int npc, cappc;
+    uint64_t copy_gen;
+    Frame frames[FRAMES];
+    int fi;
+    uint64_t serial;                          /* the frame being recorded */
+    VkSemaphore waits[8];
+    int nwaits;
+    VkCommandPool pool;
+    int sample_only;                          /* (vk_set_sample_only) textures sampled as they are */
+} VkCtx;
+
+#if defined(_MSC_VER)
+#define VK_TLS __declspec(thread)
+#else
+#define VK_TLS __thread
+#endif
+static VkCtx s_ctx0 = { .copy_gen = 1 };
+static VK_TLS VkCtx *t_ctx;                   /* this thread's, when it bound one */
+static VkCtx *s_ctxs[4] = { &s_ctx0 };
+static int s_nctx = 1;
+static Lock s_pipelock;
+
+static VkCtx *CUR(void) { return t_ctx ? t_ctx : &s_ctx0; }
+
+#define st              (CUR()->st_)
+#define s_rendering     (CUR()->rendering)
+#define s_pass_rt       (CUR()->pass_rt)
+#define s_pass_ds       (CUR()->pass_ds)
+#define s_bound_pipe    (CUR()->bound_pipe)
+#define s_dyn           (CUR()->dyn)
+#define s_last_pipe     (CUR()->last_pipe)
+#define s_bound         (CUR()->bound)
+#define s_pc            (CUR()->pc)
+#define s_npc           (CUR()->npc)
+#define s_cappc         (CUR()->cappc)
+#define s_copy_gen      (CUR()->copy_gen)
+#define s_frames        (CUR()->frames)
+#define s_fi            (CUR()->fi)
+#define s_serial        (CUR()->serial)
+#define s_waits         (CUR()->waits)
+#define s_nwaits        (CUR()->nwaits)
+#define s_pool          (CUR()->pool)
+
+static VkCommandBuffer cmd(void) { return s_frames[s_fi].cmd; }
+
+/* An object used by the frame being recorded: its last use, never lowered
+ * (two contexts' frames interleave). */
+static void use_at(volatile uint64_t *p)
+{
+    uint64_t want = s_serial, have;
+    while ((have = *p) < want) {
+#if defined(_MSC_VER)
+        if ((uint64_t)InterlockedCompareExchange64((volatile LONG64 *)p, (LONG64)want, (LONG64)have) == have)
+            break;
+#else
+        if (__sync_bool_compare_and_swap(p, have, want))
+            break;
+#endif
+    }
+}
+
+/* The lifetimes' bound: every context's frames below its oldest pending one
+ * are done -- the lowest of those, less one, is s_done_serial. Under
+ * s_deadlock (frames' serial and submitted change under it too). */
+static void ctx_done(void)
+{
+    uint64_t low = UINT64_MAX;
+    int c, i;
+    for (c = 0; c < s_nctx; c++) {
+        VkCtx *x = s_ctxs[c];
+        if (x->serial && x->serial < low)
+            low = x->serial;                  /* (the frame being recorded) */
+        for (i = 0; i < FRAMES; i++)
+            if (x->frames[i].submitted && x->frames[i].serial < low)
+                low = x->frames[i].serial;
+    }
+    if (low != UINT64_MAX && low - 1 > s_done_serial)
+        s_done_serial = low - 1;
+}
 
 static void flush_copies(void)
 {
@@ -441,14 +534,15 @@ static void begin_frame(void)
         PROF_BEGIN(0);
         vkWaitForFences(s_dev, 1, &f->fence, VK_TRUE, UINT64_MAX);
         PROF_END(0, PR_FENCE);
-        if (f->serial > s_done_serial)
-            s_done_serial = f->serial;
-        f->submitted = 0;
     }
     vkResetFences(s_dev, 1, &f->fence);
+    lock(&s_deadlock);
+    f->submitted = 0;
+    f->serial = s_serial = ++s_serial_next;
+    ctx_done();
+    unlock(&s_deadlock);
     reap();
     f->ring_pos = 0;
-    f->serial = ++s_serial;
     vkResetCommandBuffer(f->cmd, 0);
     memset(&bi, 0, sizeof bi);
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -488,7 +582,9 @@ static void submit(VkSemaphore signal)
         PROF_END(0, PR_SUBMIT);
     }
     s_nwaits = 0;
-    f->submitted = 1;
+    lock(&s_deadlock);
+    f->submitted = 1;                         /* (ctx_done reads it) */
+    unlock(&s_deadlock);
     s_fi = (s_fi + 1) % FRAMES;
     begin_frame();
 }
@@ -500,8 +596,10 @@ static void flush_wait(void)
     if (s_prof) s_prof_n[PR_FLUSHWAIT]++;
     submit(VK_NULL_HANDLE);
     vkWaitForFences(s_dev, 1, &s_frames[prev].fence, VK_TRUE, UINT64_MAX);
-    if (s_frames[prev].serial > s_done_serial)
-        s_done_serial = s_frames[prev].serial;
+    lock(&s_deadlock);
+    s_frames[prev].submitted = 0;
+    ctx_done();
+    unlock(&s_deadlock);
 }
 
 /* The upload ring: `bytes` of this submission's, aligned; NULL if full. */
@@ -658,6 +756,52 @@ static VkDeviceSize level_bytes(GpuFormat f, uint32_t w, uint32_t h, uint32_t *r
 /* ── init ──────────────────────────────────────────────────────────────── */
 
 static GpuTexture *make_dummy(int cube);
+
+/* A context's command pool, command buffers, fences and upload rings. */
+static int ctx_setup(VkCtx *x)
+{
+    VkCommandPoolCreateInfo pi;
+    VkCommandBufferAllocateInfo ai;
+    VkCommandBuffer cbs[FRAMES];
+    VkFenceCreateInfo fi;
+    int i;
+    memset(&pi, 0, sizeof pi);
+    pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pi.queueFamilyIndex = s_qfam;
+    if (vkCreateCommandPool(s_dev, &pi, NULL, &x->pool) != VK_SUCCESS)
+        return 0;
+    memset(&ai, 0, sizeof ai);
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = x->pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = FRAMES;
+    if (vkAllocateCommandBuffers(s_dev, &ai, cbs) != VK_SUCCESS)
+        return 0;
+    memset(&fi, 0, sizeof fi);
+    fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    x->copy_gen = 1;
+    for (i = 0; i < FRAMES; i++) {
+        VkBufferCreateInfo bi;
+        VmaAllocationCreateInfo vai;
+        VmaAllocationInfo inf;
+        x->frames[i].cmd = cbs[i];
+        vkCreateFence(s_dev, &fi, NULL, &x->frames[i].fence);
+        memset(&bi, 0, sizeof bi);
+        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size = RING_BYTES;
+        bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+                 | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+        memset(&vai, 0, sizeof vai);
+        vai.usage = VMA_MEMORY_USAGE_AUTO;
+        vai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        vai.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;   /* (mapped and never flushed: phones have non-coherent types) */
+        if (vmaCreateBuffer(s_vma, &bi, &vai, &x->frames[i].ring, &x->frames[i].ring_mem, &inf) != VK_SUCCESS)
+            return 0;
+        x->frames[i].ring_ptr = (uint8_t *)inf.pMappedData;
+    }
+    return 1;
+}
 
 static void vk_pcache_init(void);           /* (gpu_vk_draw.inc) */
 
@@ -828,12 +972,17 @@ int vk_init(void *window)
         f2.pNext = &f13;
         f13.dynamicRendering = VK_TRUE;
         f13.synchronization2 = VK_TRUE;
-        f2.features.depthClamp = VK_TRUE;
         {
             /* BC textures where the GPU has them; else (phones without them,
              * or BUFFY_VK_SOFT_BC=1 for testing) decoded on the CPU at upload */
             VkPhysicalDeviceFeatures have;
             vkGetPhysicalDeviceFeatures(s_phys, &have);
+            /* depth clamp where the GPU has it (some Mali drivers don't):
+             * without it, those few draws clip at the near and far planes */
+            s_depth_clamp = have.depthClamp;
+            f2.features.depthClamp = have.depthClamp;
+            if (!have.depthClamp)
+                fprintf(stderr, "  [VK] no depth clamp on this GPU\n");
             s_soft_bc = !have.textureCompressionBC || (getenv("BUFFY_VK_SOFT_BC") && getenv("BUFFY_VK_SOFT_BC")[0] == '1');
             f2.features.textureCompressionBC = s_soft_bc ? VK_FALSE : VK_TRUE;
             if (s_soft_bc)
@@ -883,46 +1032,17 @@ int vk_init(void *window)
     lock_init(&s_ulock);
     lock_init(&s_deadlock);
     s_render_tid = thread_id();
+    lock_init(&s_pipelock);
     {
         VkCommandPoolCreateInfo pi;
-        VkCommandBufferAllocateInfo ai;
-        VkCommandBuffer cbs[FRAMES];
-        VkFenceCreateInfo fi;
         memset(&pi, 0, sizeof pi);
         pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        pi.queueFamilyIndex = s_qfam;
-        vkCreateCommandPool(s_dev, &pi, NULL, &s_pool);
         pi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        pi.queueFamilyIndex = s_qfam;
         vkCreateCommandPool(s_dev, &pi, NULL, &s_upool);
-        memset(&ai, 0, sizeof ai);
-        ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        ai.commandPool = s_pool;
-        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        ai.commandBufferCount = FRAMES;
-        vkAllocateCommandBuffers(s_dev, &ai, cbs);
-        memset(&fi, 0, sizeof fi);
-        fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        for (i = 0; i < FRAMES; i++) {
-            VkBufferCreateInfo bi;
-            VmaAllocationCreateInfo vai;
-            VmaAllocationInfo inf;
-            s_frames[i].cmd = cbs[i];
-            vkCreateFence(s_dev, &fi, NULL, &s_frames[i].fence);
-            memset(&bi, 0, sizeof bi);
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = RING_BYTES;
-            bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
-                     | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-            memset(&vai, 0, sizeof vai);
-            vai.usage = VMA_MEMORY_USAGE_AUTO;
-            vai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            vai.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;   /* (mapped and never flushed: phones have non-coherent types) */
-            if (vmaCreateBuffer(s_vma, &bi, &vai, &s_frames[i].ring, &s_frames[i].ring_mem, &inf) != VK_SUCCESS)
-                return 0;
-            s_frames[i].ring_ptr = (uint8_t *)inf.pMappedData;
-        }
     }
+    if (!ctx_setup(&s_ctx0))
+        return 0;
     {
         /* one push-descriptor set: b0 b1, t0..t7, s0..s3 */
         VkDescriptorSetLayoutBinding b[14];
@@ -969,9 +1089,55 @@ int vk_init(void *window)
 
 const char *vk_adapter_name(void) { return s_adapter; }
 
+/* What this thread's context has recorded, submitted now (no wait). */
 void vk_flush(void)
 {
-    /* (no-op: a submission happens at each present) */
+    if (s_up)
+        submit(VK_NULL_HANDLE);
+}
+
+/* Another thread's context (the presenter's): made on that thread, which
+ * binds it at once; NULL when there is no room. */
+void *vk_context_create(void)
+{
+    VkCtx *x;
+    if (!s_up || s_nctx >= (int)(sizeof s_ctxs / sizeof s_ctxs[0]) || !(x = (VkCtx *)calloc(1, sizeof *x)))
+        return NULL;
+    if (!ctx_setup(x)) {
+        free(x);
+        return NULL;
+    }
+    lock(&s_deadlock);
+    s_ctxs[s_nctx++] = x;
+    unlock(&s_deadlock);
+    t_ctx = x;
+    begin_frame();
+    return x;
+}
+
+/* While on: this thread's draws sample textures in the layout they are in,
+ * without changing it -- they are another thread's (the game's textures, as
+ * the presenter replays its draws: their layout is the game thread's to
+ * change, and the presenter took them when they were readable). */
+void vk_set_sample_only(int on)
+{
+    CUR()->sample_only = on;
+}
+
+/* A texture made readable now (as a draw sampling it would make it), so
+ * another thread can sample it as it is (vk_set_sample_only). */
+void vk_texture_prepare_sample(GpuTexture *t)
+{
+    if (t && t->img && t->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        end_rendering();
+        image_barrier(cmd(), t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+}
+
+/* This thread records with `ctx` (NULL: the first context's, the game's). */
+void vk_context_bind(void *ctx)
+{
+    t_ctx = (VkCtx *)ctx;
 }
 
 #include "gpu_vk_res.inc"

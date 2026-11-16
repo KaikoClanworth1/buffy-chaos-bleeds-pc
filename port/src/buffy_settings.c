@@ -209,6 +209,18 @@ void buffy_settings_set_fullscreen(int mode)
 }
 
 int  buffy_settings_fps_limit(void) { return s_fps_limit; }
+/* The rate the game itself runs at: the FPS limit up to 60. The engine was
+ * made for 60 (and PAL's 50) and some of it counts frames -- above 60, Buffy
+ * could not climb through the cemetery's window (issue #7). Frames above it
+ * are drawn in between (buffy_native.c). BUFFY_GAME_RATE_UNCAPPED=1: the
+ * game at the limit, as before (testing). */
+int  buffy_settings_game_rate(void)
+{
+    static int uncapped = -1;
+    if (uncapped < 0)
+        uncapped = getenv("BUFFY_GAME_RATE_UNCAPPED") && getenv("BUFFY_GAME_RATE_UNCAPPED")[0] == '1';
+    return s_fps_limit > 60 && !uncapped ? 60 : s_fps_limit;
+}
 int  buffy_settings_show_fps(void)  { return s_show_fps; }
 int  buffy_settings_overlay(void)   { return s_overlay; }
 

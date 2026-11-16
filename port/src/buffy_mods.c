@@ -2638,6 +2638,25 @@ void EXApp_MainUpdate_000BD240(void)
             buffy_input_level_ready();                 /* (test scripts' level clock) */
             if (!level_t0)
                 level_t0 = GetTickCount();
+            {
+                /* BUFFY_TEST_TELEPORT=secs:x:y:z[:facing] (testing): player 1
+                 * put there, secs after the level started */
+                static int moved;
+                const char *tp = getenv("BUFFY_TEST_TELEPORT");
+                if (tp && !moved && GetTickCount() - level_t0 > (DWORD)(atof(tp) * 1000)) {
+                    float v[4] = { 0, 0, 0, 0 };
+                    uint32_t it = MEM32(0x26DC54);
+                    if (sscanf(tp, "%*f:%f:%f:%f:%f", &v[0], &v[1], &v[2], &v[3]) >= 3) {
+                        int k;
+                        for (k = 0; k < 3; k++)
+                            memcpy((void *)XBOX_PTR(it + 0xAC + k * 4), &v[k], 4);
+                        if (strchr(strchr(strchr(strchr(tp, ':') + 1, ':') + 1, ':') + 1, ':'))
+                            memcpy((void *)XBOX_PTR(it + 0xBC), &v[3], 4);
+                        fprintf(stderr, "[MODS] (test) player 1 put at %.2f %.2f %.2f\n", v[0], v[1], v[2]);
+                    }
+                    moved = 1;
+                }
+            }
             /* BUFFY_TEST_P2_JOIN=secs:row (testing): player 2 joins as story
              * character `row`, secs after the level started (as a pick does) */
             if (pj && !joined && strchr(pj, ':') && s_story_coop && s_trig && !MEM32(0x26DC58)

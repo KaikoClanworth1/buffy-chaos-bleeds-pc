@@ -1084,13 +1084,24 @@ typedef struct {
     int n, cap;
     float *k;                       /* NREC_KFLOATS + NREC_PFLOATS a draw */
     int kn, kcap;
+    GpuBuffer *ib;                  /* the index copies' buffer (s_ribs) */
 } NFrame;
 
 static NFrame s_ncur, s_nprev;
+/* The presenter's job (the port's presenter thread, buffy_native.c): this
+ * frame, records and all, and the last one's keys and constants -- handed
+ * over at the frame's end while the game goes on to record the next. The
+ * record buffers alternate, so the next frame's copies never land in what
+ * the presenter still draws from. */
+static NFrame s_jcur, s_jprev;
+static int s_job_ok;
 static int s_interp_on;
 static GpuTexture *s_interp_main;
 static const float *s_rec_k;        /* this draw's vertex constants (the k[] draw_one uploads) */
-static GpuBuffer *s_rvb, *s_rib, *s_icb_vs, *s_icb_ps;
+static GpuBuffer *s_rvbs[2], *s_ribs[2], *s_icb_vs, *s_icb_ps;
+static int s_rpar;                  /* which of the two record buffers this frame copies into */
+#define s_rvb s_rvbs[s_rpar]
+#define s_rib s_ribs[s_rpar]
 /* The frame in between's constants, every draw's at once: one buffer each
  * for the vertex and pixel shaders, written with a single map a frame and
  * bound a draw's slice at a time (Direct3D 11.1 offsets). Rewriting a small
@@ -1239,6 +1250,7 @@ static void nrec_draw(const NativeDraw *d, GpuTexture *rt, GpuTexture *ds, const
         s_rvb_pos += nv;
     }
     gpu_buffer_copy(s_rib, s_rib_pos * 4, s_nib, ib_first * 4, nidx * 4);
+    s_ncur.ib = s_rib;
     r->ib_first = s_rib_pos;
     s_rib_pos += nidx;
     memcpy(k, s_rec_k, NREC_KFLOATS * sizeof(float));
@@ -1287,6 +1299,7 @@ void nv2a_native_interp_frame_end(void)
     s_ncur = t;
     s_ncur.n = 0;
     s_ncur.kn = 0;
+    s_ncur.ib = NULL;
     {
         int i;
         for (i = 0; i < s_nprev.n; i++) {
@@ -1333,15 +1346,15 @@ static int nrec_same(const NRec *a, const NRec *b)
 
 /* The frame in between (t: 0 the previous frame, 1 this one), drawn into a
  * picture of the main one's size; 0 when there is nothing to draw. */
-int nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_tex)
+static int interp_render_frames(NFrame *cur, NFrame *prev, float t, GpuTexture *main_tex, GpuTexture **out_tex)
 {
     int i, blended = 0, drawn = 0, cuts = 0, *used;
     float *kb;
-    if (!s_interp_on || s_rec_full || !s_ncur.n || !s_nprev.n || !main_tex || !interp_targets(main_tex))
+    if (!s_interp_on || s_rec_full || !cur->n || !prev->n || !main_tex || !interp_targets(main_tex))
         return 0;
     if (!(kb = (float *)malloc((NREC_KFLOATS) * sizeof(float))))
         return 0;
-    if (!(used = (int *)calloc((size_t)s_nprev.n, sizeof(int)))) {
+    if (!(used = (int *)calloc((size_t)prev->n, sizeof(int)))) {
         free(kb);
         return 0;
     }
@@ -1353,11 +1366,11 @@ int nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_te
         if (s_iztex)
             gpu_clear_depth(s_iztex, GPU_CLEAR_DEPTH | GPU_CLEAR_STENCIL, 1.0f, 0);
     }
-    if (ibig_reserve(s_ncur.n)) {
+    if (ibig_reserve(cur->n)) {
         /* 1: every draw's constants, blended where the draw matches one of the
          * last frame's, into the two big buffers (one map each) */
         struct { void *pData; } mv = { NULL }, mp = { NULL };
-        int pj = 0, ok = 1, still = s_ncur.n == s_nprev.n;   /* nothing moved (a paused game) */
+        int pj = 0, ok = 1, still = cur->n == prev->n;   /* nothing moved (a paused game) */
         if (!(mv.pData = gpu_buffer_map(s_ibig_vs, GPU_MAP_DISCARD)))
             ok = 0;
         else if (!(mp.pData = gpu_buffer_map(s_ibig_ps, GPU_MAP_DISCARD))) {
@@ -1369,23 +1382,23 @@ int nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_te
             free(used);
             return 0;
         }
-        for (i = 0; i < s_ncur.n; i++) {
-            NRec *r = &s_ncur.r[i];
-            const float *kc = s_ncur.k + r->k_at;
+        for (i = 0; i < cur->n; i++) {
+            NRec *r = &cur->r[i];
+            const float *kc = cur->k + r->k_at;
             float *dst = (float *)mv.pData + (size_t)i * NREC_VS_SLOT * 4;
             int j, m = -1;
             if (r->kind == 1)
                 continue;
             memcpy((float *)mp.pData + (size_t)i * NREC_PS_SLOT * 4, kc + NREC_KFLOATS, NREC_PFLOATS * sizeof(float));
-            for (j = pj; j < s_nprev.n; j++)
-                if (!used[j] && nrec_same(r, &s_nprev.r[j])) { m = j; break; }
+            for (j = pj; j < prev->n; j++)
+                if (!used[j] && nrec_same(r, &prev->r[j])) { m = j; break; }
             if (m < 0)
-                for (j = 0; j < pj && j < s_nprev.n; j++)
-                    if (!used[j] && nrec_same(r, &s_nprev.r[j])) { m = j; break; }
+                for (j = 0; j < pj && j < prev->n; j++)
+                    if (!used[j] && nrec_same(r, &prev->r[j])) { m = j; break; }
             if (m >= 0) {
                 /* blended and measured in one pass; a jump (the draw moved
                  * too far to be the same motion) is drawn as it is */
-                const float *kp = s_nprev.k + s_nprev.r[m].k_at;
+                const float *kp = prev->k + prev->r[m].k_at;
                 float diff = 0, mag = 0;
                 used[m] = 1;
                 pj = m + 1;
@@ -1432,8 +1445,8 @@ int nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_te
             return 1;
         }
         /* 2: the draws, each with its slice of the two */
-        for (i = 0; i < s_ncur.n; i++) {
-            NRec *r = &s_ncur.r[i];
+        for (i = 0; i < cur->n; i++) {
+            NRec *r = &cur->r[i];
             uint32_t vfirst = (uint32_t)i * NREC_VS_SLOT, pfirst = (uint32_t)i * NREC_PS_SLOT;
             if (r->kind == 1) {
                 if (r->cflags & 0xF0)
@@ -1450,7 +1463,7 @@ int nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_te
             gpu_set_depth(r->dss, r->sref);
             gpu_set_layout(r->il);
             gpu_set_vertex_buffers(0, 4, r->vb, r->stride, r->offs);
-            gpu_set_index_buffer(s_rib);
+            gpu_set_index_buffer(cur->ib);
             gpu_set_topology(r->topo);
             gpu_set_shaders(r->vs, r->ps);
             gpu_set_cbuffer(GPU_VS, 1, s_ibig_vs, vfirst, NREC_VS_SLOT);
@@ -1486,6 +1499,51 @@ int nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_te
         return 0;                                        /* a cut: no frame in between */
     *out_tex = s_itex;
     return drawn > 0;
+}
+
+int nv2a_native_interp_render(float t, GpuTexture *main_tex, GpuTexture **out_tex)
+{
+    return interp_render_frames(&s_ncur, &s_nprev, t, main_tex, out_tex);
+}
+
+/* The game thread, at its frame's end, the presenter idle (its last job
+ * done): this frame becomes the presenter's job -- its textures made
+ * readable, as the presenter samples them as they are -- and recording goes
+ * on into the other record buffers. Instead of nv2a_native_interp_frame_end. */
+void nv2a_native_interp_handoff(void)
+{
+    NFrame t;
+    int i, j;
+    nrec_release(&s_jcur);                       /* (the last job's: keys and constants kept) */
+    t = s_jprev;
+    s_jprev = s_jcur;
+    s_jcur = s_ncur;
+    s_ncur = t;
+    s_ncur.n = 0;
+    s_ncur.kn = 0;
+    s_ncur.ib = NULL;
+    s_job_ok = !s_rec_full && s_jcur.n && s_jprev.n && s_jcur.ib;
+    for (i = 0; i < s_jcur.n; i++)
+        if (!s_jcur.r[i].kind)
+            for (j = 0; j < 8; j++)
+                if (s_jcur.r[i].srv[j])
+                    gpu_texture_prepare_sample(s_jcur.r[i].srv[j]);
+    s_rpar ^= 1;
+    s_rvb_pos = 0;
+    s_rib_pos = 0;
+    s_rec_full = 0;
+}
+
+/* The presenter: the job's frame in between at t (0 the last frame, 1 this). */
+int nv2a_native_interp_render_job(float t, GpuTexture *main_tex, GpuTexture **out_tex)
+{
+    int ok;
+    if (!s_job_ok)
+        return 0;
+    gpu_set_sample_only(1);                      /* (the game's textures: as the game left them) */
+    ok = interp_render_frames(&s_jcur, &s_jprev, t, main_tex, out_tex);
+    gpu_set_sample_only(0);
+    return ok;
 }
 
 static int s_ntrace_gpu_vb;

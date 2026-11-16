@@ -1418,6 +1418,64 @@ static void android_surface_sync(void)
 }
 #endif
 
+/* A shown frame's bookkeeping, on the game's thread: display changes (which
+ * may drop every surface), pacing, the frame count and the title's rate. */
+static void gpu_show_after(void)
+{
+    int i;
+    gpu_apply_display();          /* may drop every surface, s_surf[i] too */
+    gpu_pace_frame();
+    s_frame_no++;
+    s_draw_in_frame = 0;
+    {
+        /* Frames per second in the title bar. */
+        static DWORD t0;
+        static unsigned frames;
+        frames++;
+        if (GetTickCount() - t0 >= 1000) {
+            char title[128];
+            sprintf_s(title, sizeof title,
+                      "Buffy the Vampire Slayer: Chaos Bleeds  -  %u fps%s%s", frames,
+                      (int)(s_title_note_until - GetTickCount()) > 0 ? "  -  " : "",
+                      (int)(s_title_note_until - GetTickCount()) > 0 ? s_title_note : "");
+            SetWindowTextA(s_gpu_hwnd, title);
+            if (getenv("RECOMP_VP_STATS"))
+                fprintf(stderr, "  [GPU11] %u fps at t=%lus\n", frames, (GetTickCount() - s_gpu_t0) / 1000);
+            {
+                /* BUFFY_PEEK=va,va,...: guest dwords (hex and as float) once a second. */
+                const char *pk = getenv("BUFFY_PEEK");
+                const uint8_t *pmem = (const uint8_t *)xbox_GetMemoryOffset();
+                while (pk && *pk) {
+                    char *end;
+                    unsigned long va = strtoul(pk, &end, 16);
+                    if (end == pk) break;
+                    fprintf(stderr, "  [PEEK] %08lX = %08X (%g)\n", va, *(const uint32_t *)(pmem + va),
+                            *(const float *)(pmem + va));
+                    if (*end != ',') break;
+                    pk = end + 1;
+                }
+            }
+            frames = 0;
+            t0 = GetTickCount();
+        }
+    }
+    {
+        static DWORD last;
+        if (getenv("RECOMP_VP_STATS") && GetTickCount() - last > 5000) {
+            last = GetTickCount();
+            fprintf(stderr, "  [GPU11] tex: disabled %llu nooff %llu badsize %llu rt %llu cached %llu new %llu fail %llu tiny %llu | last st0 ctl0 %08X fmt %08X off %08X\n",
+                    s_tx_why[0], s_tx_why[1], s_tx_why[2], s_tx_why[3], s_tx_why[4], s_tx_why[5], s_tx_why[6], s_tx_why[7],
+                    s_tx_last_ctl0, s_tx_last_fmt, s_tx_last_off);
+            memset(s_tx_why, 0, sizeof s_tx_why);
+            fprintf(stderr, "  [GPU11] shaders %d | stage modes", s_ps_count);
+            for (i = 0; i < 32; i++)
+                if (s_stage_mode_seen[i])
+                    fprintf(stderr, " %d:%llu", i, s_stage_mode_seen[i]);
+            fprintf(stderr, "\n");
+        }
+    }
+}
+
 static void gpu_show(GpuSurface *shown)
 {
     int i;
@@ -1463,57 +1521,7 @@ static void gpu_show(GpuSurface *shown)
                 gpu_overlay_tick();                /* window 1's frames: the overlay's frame rate */
             gpu_screenshot(shown, target == 1);
             gpu_snapshot(shown, target == 1);
-            gpu_apply_display();          /* may drop every surface, s_surf[i] too */
-            gpu_pace_frame();
-            s_frame_no++;
-            s_draw_in_frame = 0;
-            {
-                /* Frames per second in the title bar. */
-                static DWORD t0;
-                static unsigned frames;
-                frames++;
-                if (GetTickCount() - t0 >= 1000) {
-                    char title[128];
-                    sprintf_s(title, sizeof title,
-                              "Buffy the Vampire Slayer: Chaos Bleeds  -  %u fps%s%s", frames,
-                              (int)(s_title_note_until - GetTickCount()) > 0 ? "  -  " : "",
-                              (int)(s_title_note_until - GetTickCount()) > 0 ? s_title_note : "");
-                    SetWindowTextA(s_gpu_hwnd, title);
-                    if (getenv("RECOMP_VP_STATS"))
-                        fprintf(stderr, "  [GPU11] %u fps at t=%lus\n", frames, (GetTickCount() - s_gpu_t0) / 1000);
-                    {
-                        /* BUFFY_PEEK=va,va,...: guest dwords (hex and as float) once a second. */
-                        const char *pk = getenv("BUFFY_PEEK");
-                        const uint8_t *pmem = (const uint8_t *)xbox_GetMemoryOffset();
-                        while (pk && *pk) {
-                            char *end;
-                            unsigned long va = strtoul(pk, &end, 16);
-                            if (end == pk) break;
-                            fprintf(stderr, "  [PEEK] %08lX = %08X (%g)\n", va, *(const uint32_t *)(pmem + va),
-                                    *(const float *)(pmem + va));
-                            if (*end != ',') break;
-                            pk = end + 1;
-                        }
-                    }
-                    frames = 0;
-                    t0 = GetTickCount();
-                }
-            }
-            {
-                static DWORD last;
-                if (getenv("RECOMP_VP_STATS") && GetTickCount() - last > 5000) {
-                    last = GetTickCount();
-                    fprintf(stderr, "  [GPU11] tex: disabled %llu nooff %llu badsize %llu rt %llu cached %llu new %llu fail %llu tiny %llu | last st0 ctl0 %08X fmt %08X off %08X\n",
-                            s_tx_why[0], s_tx_why[1], s_tx_why[2], s_tx_why[3], s_tx_why[4], s_tx_why[5], s_tx_why[6], s_tx_why[7],
-                            s_tx_last_ctl0, s_tx_last_fmt, s_tx_last_off);
-                    memset(s_tx_why, 0, sizeof s_tx_why);
-                    fprintf(stderr, "  [GPU11] shaders %d | stage modes", s_ps_count);
-                    for (i = 0; i < 32; i++)
-                        if (s_stage_mode_seen[i])
-                            fprintf(stderr, " %d:%llu", i, s_stage_mode_seen[i]);
-                    fprintf(stderr, "\n");
-                }
-            }
+            gpu_show_after();
             return;
         }
     }
@@ -1579,6 +1587,52 @@ void nv2a_gpu_native_present_extra(GpuTexture *tex, uint32_t w, uint32_t h, uint
         gpu_save_bmp(tex, pw, ph, path);
         s_interp_shot = -1;
     }
+}
+
+/* The port's presenter thread (frames in between, buffy_native.c): it
+ * shows the frames -- the game's thread keeps the bookkeeping
+ * (nv2a_gpu_native_frame_done) and waits for the presenter to be idle before
+ * it changes the display. `real`: a game frame (the overlay's frame count,
+ * screenshots), else a frame in between. Window 1 only. */
+void nv2a_gpu_native_present_on_thread(GpuTexture *tex, uint32_t w, uint32_t h, uint32_t pw, uint32_t ph, int real)
+{
+    static GpuSurface s;
+    if (s_gpu_state != 1)
+        return;
+#if defined(BUFFY_ANDROID)
+    android_surface_sync();
+#endif
+    if (!s_main_sc)
+        return;
+    memset(&s, 0, sizeof s);
+    s.gt = tex; s.w = w; s.h = h; s.pw = pw; s.ph = ph; s.used = 1;
+    gpu_blit_to(&s, s_main_sc, &s_resize_pending);
+    gpu_overlay_draw(s_main_sc);
+    gpu_swapchain_present(s_main_sc, (int)s_opt_vsync);
+    if (real) {
+        gpu_overlay_tick();
+        gpu_screenshot(&s, 0);
+        gpu_snapshot(&s, 0);
+    } else if (getenv("BUFFY_SHOTS_INTERP") && getenv("BUFFY_SHOTS") && s_interp_shot >= 0) {
+        char path[MAX_PATH];
+        sprintf_s(path, sizeof path, "%s\\shot%03d_i.bmp", getenv("BUFFY_SHOTS"), s_interp_shot);
+        gpu_save_bmp(tex, pw, ph, path);
+        s_interp_shot = -1;
+    }
+}
+
+/* The game's thread, its frame handed to the presenter: what showing it
+ * does besides showing it. */
+void nv2a_gpu_native_frame_done(void)
+{
+    if (s_gpu_state == 1)
+        gpu_show_after();
+}
+
+/* A display change is waiting (the presenter must be idle for it). */
+int nv2a_gpu_display_change_pending(void)
+{
+    return s_opt_dirty != 0;
 }
 
 /* Is vsync on (the in-between frame's timing depends on it). */

@@ -958,21 +958,37 @@ double g_native_draw_ms;                   /* this frame's draws, host time (BUF
 LARGE_INTEGER g_frame_begin;               /* this frame's work began (the last Swap returned) */
 int buffy_settings_fps_limit(void);
 
-static int interp_active(void)
+/* How many frames a second the display gets, the game's own and the ones
+ * drawn in between together; 0 when none are drawn in between. Above a 60
+ * FPS limit the game runs at 60 and the rest are drawn in between, up to the
+ * limit (and with vsync, the display's refresh rate) in whole multiples of
+ * the game's rate, so they are evenly spaced (144: 120); at 60 the Frame
+ * interpolation setting doubles it on a display of 100 Hz or more. One
+ * window only (co-op's second window and split screen: the game's frames). */
+static int interp_rate(void)
 {
     static int hz = -1;
-    /* above a 60 FPS limit the real frames come that fast themselves */
-    if (!buffy_settings_frame_interpolation() || nv2a_gpu_has_second_window() || buffy_settings_fps_limit() > 60)
+    int game = buffy_settings_game_rate(), limit = buffy_settings_fps_limit(), rate;
+    if (nv2a_gpu_has_second_window())
         return 0;
     if (hz < 0) {
         DEVMODEW dm;
         memset(&dm, 0, sizeof dm);
         dm.dmSize = sizeof dm;
         hz = EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) ? (int)dm.dmDisplayFrequency : 60;
-        fprintf(stderr, "[NATIVE] frame interpolation: display at %d Hz%s\n", hz,
-                hz < 100 ? " (with vsync on it only shows with vsync off)" : "");
+        if (hz < 30)
+            hz = 60;
+        fprintf(stderr, "[NATIVE] display at %d Hz; game at %d, FPS limit %d\n", hz, game, limit);
     }
-    return !nv2a_gpu_vsync() || hz >= 100 || getenv("BUFFY_INTERP");
+    if (limit > game)
+        rate = limit;
+    else if (buffy_settings_frame_interpolation() && (!nv2a_gpu_vsync() || hz >= 100 || getenv("BUFFY_INTERP")))
+        rate = game * 2;
+    else
+        return 0;
+    if (nv2a_gpu_vsync() && rate > hz && !getenv("BUFFY_INTERP"))
+        rate = hz;                          /* (each present waits for a refresh) */
+    return rate > game ? rate : 0;
 }
 
 /* Wait `ms` (the half frame before the real frame, vsync off). */
@@ -988,6 +1004,129 @@ static void wait_ms(double ms)
     while ((double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart < ms);
 }
 
+/* ── the presenter ───────────────────────────────────────────────────────
+ *
+ * With Vulkan, the frames in between are drawn and shown by a thread of
+ * their own, so they never take the game's time: at its frame's end the game
+ * thread copies the frame aside (s_handoff), hands its draw records over
+ * (nv2a_native_interp_handoff), submits, and goes on to the next frame. The
+ * presenter -- with a GPU context of its own -- then shows the frames in
+ * between the last game frame and this one, evenly spaced over the next game
+ * frame, and this one last. So what is shown is a game frame behind (the
+ * frames in between need the frame after them). The game thread waits for
+ * the presenter to be idle before it hands over the next frame or changes
+ * the display; with Direct3D 11 (one context) the frames in between are
+ * drawn on the game thread (below). BUFFY_PRESENTER=0: that way with Vulkan
+ * too (testing). */
+int  nv2a_native_interp_render_job(float t, GpuTexture *main_tex, GpuTexture **out_tex);
+void nv2a_native_interp_handoff(void);
+void nv2a_gpu_native_present_on_thread(GpuTexture *tex, uint32_t w, uint32_t h, uint32_t pw, uint32_t ph, int real);
+void nv2a_gpu_native_frame_done(void);
+
+static HANDLE s_pres_go, s_pres_idle;        /* a job for the presenter; the presenter idle (manual reset) */
+static volatile LONG s_pres_state;           /* 0 not started, 1 running, -1 no context (Direct3D 11) */
+static GpuTexture *s_handoff;                /* the game frame the presenter shows */
+static struct { int n, vs; double frame_ms; LARGE_INTEGER t0; uint32_t pw, ph; } s_job;
+
+static DWORD WINAPI presenter_main(LPVOID ready)
+{
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    if (!gpu_context_create()) {
+        InterlockedExchange(&s_pres_state, -1);
+        SetEvent((HANDLE)ready);
+        return 0;
+    }
+    InterlockedExchange(&s_pres_state, 1);
+    SetEvent((HANDLE)ready);
+    for (;;) {
+        int j, shown = 0;
+        double slot;
+        WaitForSingleObject(s_pres_go, INFINITE);
+        slot = s_job.frame_ms / (s_job.n + 1);
+        /* the frames in between at t = j/(n+1), then the game frame, each a
+         * slot apart from the hand-over (with vsync: as the display takes
+         * them) */
+        for (j = 0; j <= s_job.n; j++) {
+            LARGE_INTEGER now;
+            double since, at = slot * j;
+            GpuTexture *it = NULL;
+            QueryPerformanceCounter(&now);
+            since = (double)(now.QuadPart - s_job.t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+            if (j < s_job.n) {
+                if (since > at + slot * 0.5 || since > s_job.frame_ms * 0.9)
+                    continue;                    /* (late: this one's slot has gone by) */
+                if (!nv2a_native_interp_render_job((float)(j + 1) / (float)(s_job.n + 1), s_handoff, &it))
+                    continue;
+            }
+            if (!s_job.vs) {
+                QueryPerformanceCounter(&now);
+                since = (double)(now.QuadPart - s_job.t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+                if (since < at)
+                    wait_ms(at - since);
+            }
+            nv2a_gpu_native_present_on_thread(j < s_job.n ? it : s_handoff, 640, 480, s_job.pw, s_job.ph, j == s_job.n);
+            if (j < s_job.n)
+                shown++;
+        }
+        if (nenv("BUFFY_NATIVE_FRAMELOG"))
+            fprintf(stderr, "[PRESENTER] %d of %d in between\n", shown, s_job.n);
+        SetEvent(s_pres_idle);
+    }
+}
+
+/* The game frame to the presenter, if it shows the frames (else 0: shown
+ * here). The presenter is idle when it returns 0. */
+static int presenter_present(int interp)
+{
+    int game = buffy_settings_game_rate();
+    GpuTextureDesc td, hd;
+    if (s_pres_state == 1)
+        WaitForSingleObject(s_pres_idle, INFINITE);   /* its last job done (and before display changes) */
+    if (!interp || interp <= game || gpu_backend() != GPU_BACKEND_VULKAN || s_pres_state < 0
+            || (nenv("BUFFY_PRESENTER") && nenv("BUFFY_PRESENTER")[0] == '0'))
+        return 0;
+    if (s_pres_state == 0) {
+        HANDLE ready = CreateEventA(NULL, TRUE, FALSE, NULL);
+        s_pres_go = CreateEventA(NULL, FALSE, FALSE, NULL);
+        s_pres_idle = CreateEventA(NULL, TRUE, TRUE, NULL);
+        CloseHandle(CreateThread(NULL, 0, presenter_main, ready, 0, NULL));
+        WaitForSingleObject(ready, INFINITE);
+        CloseHandle(ready);
+        fprintf(stderr, "[NATIVE] presenter thread: %s\n", s_pres_state == 1 ? "frames in between drawn there"
+                                                                         : "no second GPU context; frames in between drawn by the game");
+        if (s_pres_state != 1)
+            return 0;
+    }
+    nv2a_gpu_native_frame_done();                /* (display changes: the presenter is idle) */
+    if (!fb_ready())
+        return 0;
+    gpu_texture_desc(s_fb.tex, &td);
+    if (s_handoff)
+        gpu_texture_desc(s_handoff, &hd);
+    if (!s_handoff || hd.width != td.width || hd.height != td.height || hd.format != td.format) {
+        if (s_handoff)
+            gpu_texture_release(s_handoff);
+        td.mips = 1;
+        td.flags = GPU_TEX_TARGET | GPU_TEX_SAMPLED;
+        if (!(s_handoff = gpu_texture_create(&td, NULL)))
+            return 0;
+    }
+    gpu_texture_copy(s_handoff, s_fb.tex);
+    gpu_texture_prepare_sample(s_handoff);
+    nv2a_native_interp_handoff();
+    gpu_flush();
+    s_job.n = interp / game - 1;
+    s_job.vs = nv2a_gpu_vsync();
+    s_job.frame_ms = 1000.0 / game;
+    s_job.pw = s_fb.pw;
+    s_job.ph = s_fb.ph;
+    QueryPerformanceCounter(&s_job.t0);
+    ResetEvent(s_pres_idle);
+    SetEvent(s_pres_go);
+    return 1;
+}
+
 void buffy_native_present(void)
 {
     int interp;
@@ -995,56 +1134,65 @@ void buffy_native_present(void)
         return;
     s_backbuffer = s_cur_rt;               /* what is shown is the back buffer */
     s_vp_dirty = 1;
-    interp = interp_active();
+    interp = interp_rate();
+    if (presenter_present(interp)) {
+        QueryPerformanceCounter(&s_last_real);
+        nv2a_native_interp_setup(interp, s_fb.tex);      /* (the next frame is recorded for it) */
+        return;
+    }
     if (interp) {
-        /* the in-between frame half a frame after the last real one, the real
-         * one a frame after it -- or at once when the work ran past that
-         * (the frame in between never holds the game back) */
-        GpuTexture *it = NULL;
-        LARGE_INTEGER f, now;
-        double since, frame_ms = 1000.0 / buffy_settings_fps_limit();
+        /* The frames in between the last real one and this, evenly spaced
+         * over the game's frame from the last real present (t the share of
+         * it each is at) -- as many as fit before this real one is due (the
+         * frame in between never holds the game back). The game
+         * frame's own work comes first (it is what they are drawn between),
+         * so on a busy frame fewer fit; with vsync each present waits for a
+         * refresh, so one is drawn only with a refresh left for the real one. */
+        LARGE_INTEGER f, now, q0, q1;
+        double frame_ms = 1000.0 / buffy_settings_game_rate(), since, start;
+        static double cost = 1.0;            /* what a frame in between took lately (ms), drawn and shown */
+        int k, shown = 0, vs = nv2a_gpu_vsync();
+        int n = interp / buffy_settings_game_rate() - 1;   /* in between each pair, evenly: 144 -> 1 (120/s), 240 -> 3 */
         QueryPerformanceFrequency(&f);
         QueryPerformanceCounter(&now);
-        since = s_last_real.QuadPart ? (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart : 1e9;
-        LARGE_INTEGER q0, q1, q2, q3;
-        static double cost = 1.0;            /* what the frame in between took lately (ms) */
-        double work;
-        int ok;
-        QueryPerformanceCounter(&q0);
-        /* too late for one: this frame's work left no room for it. With vsync
-         * (a 100 Hz+ display) it has to make the refresh halfway through the
-         * frame -- one later and the real frame misses its own, a whole
-         * refresh late (the pause menu, 11-13 ms of work: 40 fps); without,
-         * it has to leave the real frame its time. The frame's own work is
-         * measured from when the last Swap returned: the time since the last
-         * present also holds the 60 fps limiter's wait. */
-        work = g_frame_begin.QuadPart ? (double)(q0.QuadPart - g_frame_begin.QuadPart) * 1000.0 / (double)f.QuadPart : 0.0;
-        ok = since < 200.0
-             && work + cost < (nv2a_gpu_vsync() ? frame_ms * 0.5 - 0.5 : frame_ms - 1.0)
-             && nv2a_native_interp_render(0.5f, s_fb.tex, &it);
-        QueryPerformanceCounter(&q1);
-        if (ok)
-            cost = cost * 0.9 + 0.1 * ((double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)f.QuadPart + 0.2);
-        q2 = q3 = q1;
-        if (ok) {
-            if (!nv2a_gpu_vsync() && since < frame_ms * 0.5)
-                wait_ms(frame_ms * 0.5 - since);
-            QueryPerformanceCounter(&q2);
-            nv2a_gpu_native_present_extra(it, 640, 480, s_fb.pw, s_fb.ph);
-            QueryPerformanceCounter(&q3);
-            if (!nv2a_gpu_vsync()) {
+        start = s_last_real.QuadPart ? (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart : -1.0;
+        for (k = 1; k <= n; k++) {
+            GpuTexture *it = NULL;
+            double at = frame_ms * k / (n + 1);   /* when this one is due, from the last real present */
+            QueryPerformanceCounter(&now);
+            since = s_last_real.QuadPart ? (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart : 1e9;
+            if (since > 200.0)
+                break;                       /* (a stall: none) */
+            if (since > at + frame_ms / (n + 1) * 0.5)
+                continue;                    /* (this one's slot has gone by) */
+            if (since + cost > frame_ms - (vs ? frame_ms / (n + 1) : 1.0))
+                break;                       /* no time left before the real frame */
+            QueryPerformanceCounter(&q0);
+            if (!nv2a_native_interp_render((float)k / (float)(n + 1), s_fb.tex, &it))
+                break;
+            if (!vs) {
                 QueryPerformanceCounter(&now);
                 since = (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart;
-                if (since < frame_ms - 0.5)
-                    wait_ms(frame_ms - 0.5 - since);
+                if (since < at)
+                    wait_ms(at - since);
             }
+            nv2a_gpu_native_present_extra(it, 640, 480, s_fb.pw, s_fb.ph);
+            QueryPerformanceCounter(&q1);
+            cost = cost * 0.9 + 0.1 * ((double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)f.QuadPart);
+            shown++;
+        }
+        if (!vs) {
+            /* the real one a game frame after the last -- also with none in
+             * between: else the limiter waits after it, and that wait takes
+             * the next frame's slots */
+            QueryPerformanceCounter(&now);
+            since = (double)(now.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart;
+            if (since < frame_ms - 0.5)
+                wait_ms(frame_ms - 0.5 - since);
         }
         if (nenv("BUFFY_NATIVE_FRAMELOG"))
-            fprintf(stderr, "[NINTERP] work %.2f since %.2f render %.2f wait %.2f extra %.2f ok %d\n",
-                    work, (double)(q0.QuadPart - s_last_real.QuadPart) * 1000.0 / (double)f.QuadPart,
-                    (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)f.QuadPart,
-                    (double)(q2.QuadPart - q1.QuadPart) * 1000.0 / (double)f.QuadPart,
-                    (double)(q3.QuadPart - q2.QuadPart) * 1000.0 / (double)f.QuadPart, ok);
+            fprintf(stderr, "[NINTERP] %d in between (display %d/s, cost %.2f ms, the frame's work done %.2f ms after the last)\n",
+                    shown, interp, cost, start);
     }
     {
         LARGE_INTEGER f, a, b;

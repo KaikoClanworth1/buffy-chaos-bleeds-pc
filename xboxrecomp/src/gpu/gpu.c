@@ -9,6 +9,10 @@
 int vk_init(void *window);
 const char * vk_adapter_name(void);
 void vk_flush(void);
+void * vk_context_create(void);
+void vk_context_bind(void *ctx);
+void vk_set_sample_only(int on);
+void vk_texture_prepare_sample(GpuTexture *t);
 GpuBuffer * vk_buffer_create(uint32_t bytes, unsigned bind, GpuUsage usage, const void *init);
 void vk_buffer_release(GpuBuffer *b);
 void * vk_buffer_map(GpuBuffer *b, GpuMap how);
@@ -65,6 +69,10 @@ void vk_swapchain_present(GpuSwapchain *s, int vsync);
 static int dx_init(void *window) { (void)window; return 0; }
 #define dx_adapter_name vk_adapter_name
 #define dx_flush vk_flush
+#define dx_context_create vk_context_create
+#define dx_context_bind vk_context_bind
+#define dx_set_sample_only vk_set_sample_only
+#define dx_texture_prepare_sample vk_texture_prepare_sample
 #define dx_buffer_create vk_buffer_create
 #define dx_buffer_release vk_buffer_release
 #define dx_buffer_map vk_buffer_map
@@ -128,6 +136,10 @@ static void * dx_sampler(GpuSampler *s) { (void)s; return NULL; }
 int dx_init(void *window);
 const char * dx_adapter_name(void);
 void dx_flush(void);
+void * dx_context_create(void);
+void dx_context_bind(void *ctx);
+void dx_set_sample_only(int on);
+void dx_texture_prepare_sample(GpuTexture *t);
 GpuBuffer * dx_buffer_create(uint32_t bytes, unsigned bind, GpuUsage usage, const void *init);
 void dx_buffer_release(GpuBuffer *b);
 void * dx_buffer_map(GpuBuffer *b, GpuMap how);
@@ -214,6 +226,26 @@ const char * gpu_adapter_name(void)
 void gpu_flush(void)
 {
     if (s_backend == GPU_BACKEND_VULKAN) vk_flush(); else dx_flush();
+}
+
+void * gpu_context_create(void)
+{
+    return s_backend == GPU_BACKEND_VULKAN ? vk_context_create() : dx_context_create();
+}
+
+void gpu_context_bind(void *ctx)
+{
+    if (s_backend == GPU_BACKEND_VULKAN) vk_context_bind(ctx); else dx_context_bind(ctx);
+}
+
+void gpu_set_sample_only(int on)
+{
+    if (s_backend == GPU_BACKEND_VULKAN) vk_set_sample_only(on); else dx_set_sample_only(on);
+}
+
+void gpu_texture_prepare_sample(GpuTexture *t)
+{
+    if (s_backend == GPU_BACKEND_VULKAN) vk_texture_prepare_sample(t); else dx_texture_prepare_sample(t);
 }
 
 GpuBuffer * gpu_buffer_create(uint32_t bytes, unsigned bind, GpuUsage usage, const void *init)

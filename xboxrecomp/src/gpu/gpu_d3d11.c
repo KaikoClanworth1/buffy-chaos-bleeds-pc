@@ -88,6 +88,11 @@ int dx_init(void *window)
 
 const char *dx_adapter_name(void) { return s_adapter; }
 void dx_flush(void) { if (s_ctx) ID3D11DeviceContext_Flush(s_ctx); }
+/* (one context: another thread draws only through Vulkan) */
+void *dx_context_create(void) { return NULL; }
+void dx_context_bind(void *ctx) { (void)ctx; }
+void dx_set_sample_only(int on) { (void)on; }
+void dx_texture_prepare_sample(GpuTexture *t) { (void)t; }
 
 void *dx_device(void) { return s_dev; }
 void *dx_context(void) { return s_ctx; }

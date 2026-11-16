@@ -291,8 +291,8 @@ static void apply_script(int port, XBOX_GAMEPAD *g)
         apply_button(g, g_test_button);
     if (port == 1 && g_test_button2)
         apply_button(g, g_test_button2);
-    static int inited, n1, n2, np2;
-    static PadEvent e1[64], e2[64], ep2[64];
+    static int inited, n1, n2, n3, np2;
+    static PadEvent e1[64], e2[64], e3[64], ep2[64];
     static DWORD t0;
     LONG menu;
 
@@ -302,6 +302,7 @@ static void apply_script(int port, XBOX_GAMEPAD *g)
         n1 = parse_script(getenv("BUFFY_PAD_SCRIPT"), e1, 64);
         n2 = parse_script(getenv("BUFFY_PAD_SCRIPT2"), e2, 64);
         np2 = parse_script(getenv("BUFFY_PAD2_SCRIPT"), ep2, 64);
+        n3 = parse_script(getenv("BUFFY_PAD_SCRIPT3"), e3, 64);   /* (port 0, from when the level is up) */
     }
     menu = s_menu_ready;
     if (getenv("BUFFY_PAD_LEVEL_CLOCK")) {
@@ -331,6 +332,8 @@ static void apply_script(int port, XBOX_GAMEPAD *g)
         run_events(g, e1, n1, GetTickCount() - t0);
     else
         run_events(g, e2, n2, GetTickCount() - (DWORD)menu);
+    if (n3 && s_level_ready)
+        run_events(g, e3, n3, GetTickCount() - (DWORD)s_level_ready);
 }
 
 /* ── keyboard and mouse ───────────────────────────────────────────────────
@@ -573,14 +576,22 @@ static void apply_keyboard(XBOX_GAMEPAD *g)
 }
 
 /* Radial deadzone with rescale, so a resting stick reads zero and full tilt
- * still reaches full range. */
+ * still reaches full range -- then out to the square the Xbox pad reported:
+ * its diagonals read full on both axes ((32767, 32767), not the circle's
+ * (23170, 23170)), and the game runs only past a per-axis threshold. On a
+ * circle, a full diagonal could only walk (issue #4). */
 static void stick(SHORT x, SHORT y, float dz, SHORT *ox, SHORT *oy)
 {
-    float fx = x, fy = y, m = sqrtf(fx * fx + fy * fy), k;
+    float fx = x, fy = y, m = sqrtf(fx * fx + fy * fy), k, ax, ay, big;
     if (m <= dz) { *ox = *oy = 0; return; }
     k = (m - dz) / (32767.0f - dz);
     if (k > 1.0f) k = 1.0f;
-    k = k * 32767.0f / m;
+    ax = fabsf(fx) / m;
+    ay = fabsf(fy) / m;
+    big = ax > ay ? ax : ay;                   /* (>= 0.707: the square's edge in this direction) */
+    if (getenv("BUFFY_STICK_CIRCLE"))
+        big = 1.0f;                            /* (testing: the old circle) */
+    k = k * 32767.0f / (m * big);
     fx *= k; fy *= k;
     *ox = (SHORT)(fx > 32767.0f ? 32767 : (fx < -32768.0f ? -32768 : fx));
     *oy = (SHORT)(fy > 32767.0f ? 32767 : (fy < -32768.0f ? -32768 : fy));
@@ -658,6 +669,32 @@ void XInputGetState_0018FAFA(void)
     if (port == 0)
         apply_keyboard(&g);
     apply_script(port, &g);
+    if (port == 0 && getenv("BUFFY_TEST_LSTICK") && s_level_ready
+            && GetTickCount() - (DWORD)s_level_ready
+               > (DWORD)(getenv("BUFFY_TEST_LSTICK_AT") ? atoi(getenv("BUFFY_TEST_LSTICK_AT")) * 1000 : 15000)) {
+        /* (testing) BUFFY_TEST_LSTICK=<x>,<y>: a controller's raw left stick,
+         * through the same dead zone and square as a real one, from 15 s
+         * into the level (BUFFY_TEST_LSTICK_AT=<s>); with BUFFY_POS_LOG player 1's speed shows it */
+        const char *e = getenv("BUFFY_TEST_LSTICK"), *c = strchr(e, ',');
+        stick((SHORT)atoi(e), (SHORT)(c ? atoi(c + 1) : 0), XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE, &g.sThumbLX, &g.sThumbLY);
+    }
+    if (port == 0 && getenv("BUFFY_POS_LOG")) {
+        /* (testing) player 1's position and ground speed, each second */
+        static DWORD t;
+        static float px, pz;
+        uint32_t it = MEM32(0x26DC54u);
+        if (it && GetTickCount() - t >= 1000) {
+            float x, z;
+            uint32_t ux = MEM32(it + 0xAC), uz = MEM32(it + 0xB4);
+            memcpy(&x, &ux, 4);
+            memcpy(&z, &uz, 4);
+            fprintf(stderr, "[POS] %.2f %.2f  speed %.2f/s  stick %d %d\n", x, z,
+                    t ? sqrtf((x - px) * (x - px) + (z - pz) * (z - pz)) * 1000.0f / (GetTickCount() - t) : 0.0f,
+                    g.sThumbLX, g.sThumbLY);
+            px = x; pz = z;
+            t = GetTickCount();
+        }
+    }
     if (buffy_settings_invert_camera_x())      /* launcher: invert camera left / right */
         g.sThumbRX = g.sThumbRX == -32768 ? 32767 : (SHORT)-g.sThumbRX;
     if (port == 1 && buffy_coop_owns_back())
